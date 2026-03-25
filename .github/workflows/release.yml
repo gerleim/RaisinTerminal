@@ -1,0 +1,42 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore
+        run: dotnet restore RaisinTerminal.slnx -p:UseProjectReferences=false
+
+      - name: Build
+        run: dotnet build RaisinTerminal.slnx -c Release -p:UseProjectReferences=false --no-restore
+
+      - name: Test
+        run: dotnet test RaisinTerminal.Tests/RaisinTerminal.Tests.csproj -c Release -p:UseProjectReferences=false --no-build
+
+      - name: Publish
+        run: dotnet publish RaisinTerminal/RaisinTerminal.csproj -c Release -r win-x64 --self-contained -p:UseProjectReferences=false -o publish/RaisinTerminal
+
+      - name: Create ZIP
+        run: Compress-Archive -Path publish/RaisinTerminal/* -DestinationPath publish/RaisinTerminal-${{ github.ref_name }}-win-x64.zip
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: publish/RaisinTerminal-${{ github.ref_name }}-win-x64.zip
+          generate_release_notes: true
