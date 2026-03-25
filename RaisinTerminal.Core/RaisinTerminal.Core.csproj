@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.IO.Pipelines" Version="9.0.0" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(UseProjectReferences)' != 'false'">
+    <ProjectReference Include="..\..\LibrariesRaisin\Raisin.EventSystem\Raisin.EventSystem.csproj" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(UseProjectReferences)' == 'false'">
+    <PackageReference Include="Raisin.EventSystem" Version="1.0.1" />
+  </ItemGroup>
+
+</Project>

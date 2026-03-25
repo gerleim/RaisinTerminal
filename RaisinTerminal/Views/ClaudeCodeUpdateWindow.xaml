@@ -1,0 +1,50 @@
+<Window x:Class="RaisinTerminal.Views.ClaudeCodeUpdateWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Claude Code CLI Update"
+        Width="420" SizeToContent="Height"
+        ResizeMode="NoResize"
+        WindowStartupLocation="CenterOwner"
+        Background="{DynamicResource MaterialDesignPaper}"
+        TextElement.Foreground="{DynamicResource MaterialDesignBody}">
+    <StackPanel Margin="24">
+        <TextBlock Text="Claude Code CLI" FontSize="18" FontWeight="Bold"
+                   HorizontalAlignment="Center" Margin="0,0,0,16"/>
+
+        <!-- Version info grid -->
+        <Grid Margin="0,0,0,16">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <TextBlock Grid.Row="0" Grid.Column="0" Text="Installed version:"
+                       FontSize="13" Margin="0,0,12,6"/>
+            <TextBlock x:Name="InstalledVersionText" Grid.Row="0" Grid.Column="1"
+                       FontSize="13" FontWeight="SemiBold" Margin="0,0,0,6"/>
+
+            <TextBlock Grid.Row="1" Grid.Column="0" Text="Latest version:"
+                       FontSize="13" Margin="0,0,12,6"/>
+            <TextBlock x:Name="LatestVersionText" Grid.Row="1" Grid.Column="1"
+                       FontSize="13" FontWeight="SemiBold" Margin="0,0,0,6"/>
+        </Grid>
+
+        <!-- Status message -->
+        <TextBlock x:Name="StatusText" FontSize="12" Foreground="#888888"
+                   TextWrapping="Wrap" HorizontalAlignment="Center"
+                   Margin="0,0,0,16"/>
+
+        <!-- Buttons -->
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+            <Button x:Name="CheckButton" Content="Check for Updates" Width="140"
+                    Click="OnCheck" Margin="0,0,8,0"/>
+            <Button x:Name="UpdateButton" Content="Update" Width="100"
+                    Click="OnUpdate" IsEnabled="False" Margin="0,0,8,0"/>
+            <Button Content="Close" Width="80" IsCancel="True" Click="OnClose"/>
+        </StackPanel>
+    </StackPanel>
+</Window>

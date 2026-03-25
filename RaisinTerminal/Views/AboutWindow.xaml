@@ -1,0 +1,21 @@
+<Window x:Class="RaisinTerminal.Views.AboutWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="About RaisinTerminal"
+        Width="360" SizeToContent="Height"
+        ResizeMode="NoResize"
+        WindowStartupLocation="CenterOwner"
+        Background="{DynamicResource MaterialDesignPaper}"
+        TextElement.Foreground="{DynamicResource MaterialDesignBody}">
+    <StackPanel Margin="24" VerticalAlignment="Center">
+        <TextBlock Text="RaisinTerminal" FontSize="22" FontWeight="Bold"
+                   HorizontalAlignment="Center" Margin="0,0,0,8"/>
+        <TextBlock Text="Terminal Emulator for Claude Code"
+                   FontSize="13" Foreground="#AAAAAA"
+                   HorizontalAlignment="Center" Margin="0,0,0,12"/>
+        <TextBlock x:Name="VersionText" FontSize="12" Foreground="#888888"
+                   HorizontalAlignment="Center" Margin="0,0,0,16"/>
+        <Button Content="OK" Width="80" IsDefault="True" IsCancel="True"
+                Click="OnOk" HorizontalAlignment="Center"/>
+    </StackPanel>
+</Window>

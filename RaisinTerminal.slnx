@@ -1,0 +1,7 @@
+<Solution>
+  <Project Path="RaisinTerminal.Core/RaisinTerminal.Core.csproj" />
+  <Project Path="RaisinTerminal/RaisinTerminal.csproj" />
+  <Folder Name="/Tests/">
+    <Project Path="RaisinTerminal.Tests/RaisinTerminal.Tests.csproj" />
+  </Folder>
+</Solution>

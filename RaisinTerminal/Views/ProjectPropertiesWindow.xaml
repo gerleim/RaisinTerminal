@@ -1,0 +1,61 @@
+<Window x:Class="RaisinTerminal.Views.ProjectPropertiesWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Project Properties"
+        Width="450" SizeToContent="Height"
+        ResizeMode="NoResize"
+        WindowStartupLocation="CenterOwner"
+        Background="{DynamicResource MaterialDesignPaper}"
+        TextElement.Foreground="{DynamicResource MaterialDesignBody}">
+    <StackPanel Margin="20">
+        <!-- Id (read-only) -->
+        <TextBlock Text="Id" FontSize="12" Foreground="#AAAAAA" Margin="0,0,0,4"/>
+        <TextBox x:Name="IdBox" IsReadOnly="True" FontSize="12"
+                 Background="#2A2D2E" Foreground="#888888" BorderBrush="#444444"
+                 Padding="6,4" Margin="0,0,0,12"/>
+
+        <!-- Name -->
+        <TextBlock Text="Name" FontSize="12" Foreground="#AAAAAA" Margin="0,0,0,4"/>
+        <TextBox x:Name="NameBox" FontSize="12"
+                 Background="#2A2D2E" Foreground="#E0E0E0" BorderBrush="#444444"
+                 Padding="6,4" Margin="0,0,0,12"/>
+
+        <!-- HomePath -->
+        <TextBlock Text="Home Path" FontSize="12" Foreground="#AAAAAA" Margin="0,0,0,4"/>
+        <DockPanel Margin="0,0,0,12">
+            <Button DockPanel.Dock="Right" Content="Browse..." Width="80" Margin="8,0,0,0"
+                    Click="OnBrowse"/>
+            <TextBox x:Name="HomePathBox" FontSize="12"
+                     Background="#2A2D2E" Foreground="#E0E0E0" BorderBrush="#444444"
+                     Padding="6,4"/>
+        </DockPanel>
+
+        <!-- Icon -->
+        <TextBlock Text="Icon" FontSize="12" Foreground="#AAAAAA" Margin="0,0,0,4"/>
+        <DockPanel Margin="0,0,0,20">
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Margin="8,0,0,0">
+                <Button Content="Browse..." Width="70" Click="OnBrowseIcon" Margin="0,0,4,0"/>
+                <Button Content="Auto" Width="50" Click="OnAutoDetectIcon" Margin="0,0,4,0"
+                        ToolTip="Auto-detect icon from project files"/>
+                <Button Content="Clear" Width="50" Click="OnClearIcon"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal">
+                <Border Width="24" Height="24" Margin="0,0,8,0" VerticalAlignment="Center"
+                        Background="#2A2D2E" BorderBrush="#444444" BorderThickness="1" CornerRadius="2">
+                    <Image x:Name="IconPreview" Width="20" Height="20"
+                           RenderOptions.BitmapScalingMode="HighQuality"
+                           Stretch="Uniform"/>
+                </Border>
+                <TextBox x:Name="IconPathBox" FontSize="12" IsReadOnly="True"
+                         Background="#2A2D2E" Foreground="#888888" BorderBrush="#444444"
+                         Padding="6,4" VerticalAlignment="Center"/>
+            </StackPanel>
+        </DockPanel>
+
+        <!-- Buttons -->
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button Content="OK" Width="80" IsDefault="True" Click="OnOk" Margin="0,0,8,0"/>
+            <Button Content="Cancel" Width="80" IsCancel="True" Click="OnCancel"/>
+        </StackPanel>
+    </StackPanel>
+</Window>

@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <ApplicationIcon>Assets\app.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Resource Include="Assets\app.ico" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\RaisinTerminal.Core\RaisinTerminal.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Raisin.AvalonDock" Version="4.72.4" />
+    <PackageReference Include="Raisin.AvalonDock.Themes.VS2013" Version="4.72.4" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(UseProjectReferences)' != 'false'">
+    <ProjectReference Include="..\..\LibrariesRaisin\Raisin.EventSystem\Raisin.EventSystem.csproj" />
+    <ProjectReference Include="..\..\LibrariesRaisin\Raisin.Core\Raisin.Core.csproj" />
+    <ProjectReference Include="..\..\LibrariesRaisin\Raisin.WPF.Base\Raisin.WPF.Base.csproj" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(UseProjectReferences)' == 'false'">
+    <PackageReference Include="Raisin.EventSystem" Version="1.0.1" />
+    <PackageReference Include="Raisin.Core" Version="1.0.1" />
+    <PackageReference Include="Raisin.WPF.Base" Version="1.0.1" />
+  </ItemGroup>
+
+</Project>
