@@ -40,6 +40,7 @@ public partial class App : Application
     protected override void OnExit(ExitEventArgs e)
     {
         Events.Log(this, "RaisinTerminal exiting", category: "App");
+        CommandHistoryService.Instance.SaveNow();
         _fileLogger?.Dispose();
         _mutex?.ReleaseMutex();
         _mutex?.Dispose();

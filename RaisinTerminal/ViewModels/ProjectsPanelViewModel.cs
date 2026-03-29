@@ -8,6 +8,7 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using Raisin.WPF.Base;
+using RaisinTerminal.Core.Helpers;
 using RaisinTerminal.Models;
 using RaisinTerminal.Services;
 using RaisinTerminal.Views;
@@ -18,7 +19,8 @@ public enum TerminalStatus
 {
     Idle,
     Working,
-    WaitingForInput
+    WaitingForInput,
+    AgentsRunning
 }
 
 public class TerminalNodeViewModel : ViewModelBase
@@ -89,6 +91,8 @@ public class ProjectNodeViewModel : ViewModelBase
         Project = project;
         LoadIcon();
     }
+
+    public void RaiseNameChanged() => OnPropertyChanged(nameof(Name));
 
     public void LoadIcon()
     {
@@ -285,6 +289,16 @@ public class ProjectsPanelViewModel : ViewModelBase
         {
             UngroupedNode = null;
         }
+
+        // Evict stale entries from process-debounce cache
+        var activeIds = new HashSet<string>();
+        foreach (var s in sessions)
+            activeIds.Add(s.ContentId);
+        foreach (var key in _lastSeenRunning.Keys)
+        {
+            if (!activeIds.Contains(key))
+                _lastSeenRunning.TryRemove(key, out _);
+        }
     }
 
     private void SetupPasteImageHandler(TerminalSessionViewModel session)
@@ -424,7 +438,8 @@ public class ProjectsPanelViewModel : ViewModelBase
                 && DateTime.UtcNow - lastRun < TimeSpan.FromSeconds(4))
             {
                 var screenStatus = ClassifyClaudeScreenState(session);
-                return screenStatus == TerminalStatus.Idle ? TerminalStatus.Working : screenStatus;
+                return screenStatus is TerminalStatus.Idle or TerminalStatus.AgentsRunning
+                    ? TerminalStatus.Working : screenStatus;
             }
             return TerminalStatus.Idle;
         }
@@ -450,9 +465,13 @@ public class ProjectsPanelViewModel : ViewModelBase
     /// - Working: default when output has settled but no prompt detected
     /// </summary>
     private static TerminalStatus ClassifyClaudeScreenState(TerminalSessionViewModel session)
+        => ClassifyClaudeScreenState(row => session.ReadScreenLine(row), session.CursorRow, session.ScreenRows);
+
+    /// <summary>
+    /// Testable core: scans screen lines to classify Claude Code's state.
+    /// </summary>
+    internal static TerminalStatus ClassifyClaudeScreenState(Func<int, string> getLineText, int cursorRow, int screenRows)
     {
-        int cursorRow = session.CursorRow;
-        int screenRows = session.ScreenRows;
         if (cursorRow < 0 || screenRows <= 0) return TerminalStatus.Working;
 
         // Claude's Ink TUI may place the cursor on the status bar at the screen
@@ -465,11 +484,12 @@ public class ProjectsPanelViewModel : ViewModelBase
         int completionSummaryRow = -1;
         int idlePromptRow = -1;
         bool foundNumberedOptions = false;
+        bool foundLocalAgents = false;
         int foundOption1Row = -1;
         int foundOption2Row = -1;
         for (int row = 0; row < screenRows; row++)
         {
-            var line = session.ReadScreenLine(row);
+            var line = getLineText(row);
             var trimmed = line.TrimStart();
 
             // Claude's idle prompt uses "❯" (U+276F). Safe to scan all rows
@@ -555,6 +575,12 @@ public class ProjectsPanelViewModel : ViewModelBase
             // "ctrl-g to edit" footer appears in plan mode selection UI
             if (row >= screenRows - 5 && trimmed.Contains("ctrl-g to edit"))
                 result = TerminalStatus.WaitingForInput;
+
+            // Background agents: Claude's status bar shows "N local agent(s)"
+            // when agents are running — tracked separately so the main session
+            // can show a distinct cyan indicator instead of green Working.
+            if (row >= screenRows - 5 && trimmed.Contains("local agent"))
+                foundLocalAgents = true;
         }
 
         // Only treat numbered options as a question if both "1." and "2." appear
@@ -589,6 +615,8 @@ public class ProjectsPanelViewModel : ViewModelBase
         {
             if (foundNumberedOptions)
                 result = TerminalStatus.WaitingForInput;
+            else if (foundLocalAgents)
+                result = TerminalStatus.AgentsRunning;
             else
                 result = TerminalStatus.Idle;
         }
@@ -596,6 +624,10 @@ public class ProjectsPanelViewModel : ViewModelBase
         // Numbered options near cursor without idle prompt (e.g. plan mode selection UI)
         if (result == null && foundNumberedOptions && !foundWorkingIndicator)
             result = TerminalStatus.WaitingForInput;
+
+        // Completion summary + agents but no idle prompt visible
+        if (result == null && foundLocalAgents && !foundWorkingIndicator && foundCompletionSummary)
+            result = TerminalStatus.AgentsRunning;
 
         if (result == null)
             result = TerminalStatus.Working;
@@ -626,13 +658,8 @@ public class ProjectsPanelViewModel : ViewModelBase
         return false;
     }
 
-    private static bool IsSubPath(string path, string basePath)
-    {
-        if (string.IsNullOrEmpty(basePath)) return false;
-        var normalizedPath = Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        var normalizedBase = Path.GetFullPath(basePath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        return normalizedPath.StartsWith(normalizedBase, StringComparison.OrdinalIgnoreCase);
-    }
+    private static bool IsSubPath(string path, string basePath) =>
+        PathHelper.IsSubPath(path, basePath);
 
     private static readonly HashSet<string> SkipDirs = new(StringComparer.OrdinalIgnoreCase)
         { "bin", "obj", "node_modules", ".git", "packages", ".vs", ".idea", "TestResults" };
@@ -780,6 +807,7 @@ public class ProjectsPanelViewModel : ViewModelBase
         if (window.ShowDialog() == true)
         {
             node.LoadIcon();
+            node.RaiseNameChanged();
             SaveState();
             Rebuild();
         }

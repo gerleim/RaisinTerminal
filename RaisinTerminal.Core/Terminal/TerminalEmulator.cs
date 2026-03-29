@@ -20,8 +20,8 @@ public class TerminalEmulator
     private int _savedScrollOffset;
 
     // Current SGR attributes
-    private byte _fgR = 204, _fgG = 204, _fgB = 204;
-    private byte _bgR = 33, _bgG = 33, _bgB = 33;
+    private byte _fgR = CellData.DefaultFgR, _fgG = CellData.DefaultFgG, _fgB = CellData.DefaultFgB;
+    private byte _bgR = CellData.DefaultBgR, _bgG = CellData.DefaultBgG, _bgB = CellData.DefaultBgB;
     private bool _bold, _italic, _underline;
     private bool _reverse, _dim, _strikethrough;
 
@@ -30,8 +30,8 @@ public class TerminalEmulator
 
     // DECSC/DECRC saved cursor state
     private int _decSavedRow, _decSavedCol;
-    private byte _decSavedFgR = 204, _decSavedFgG = 204, _decSavedFgB = 204;
-    private byte _decSavedBgR = 33, _decSavedBgG = 33, _decSavedBgB = 33;
+    private byte _decSavedFgR = CellData.DefaultFgR, _decSavedFgG = CellData.DefaultFgG, _decSavedFgB = CellData.DefaultFgB;
+    private byte _decSavedBgR = CellData.DefaultBgR, _decSavedBgG = CellData.DefaultBgG, _decSavedBgB = CellData.DefaultBgB;
     private bool _decSavedBold, _decSavedItalic, _decSavedUnderline;
     private bool _decSavedReverse, _decSavedDim, _decSavedStrikethrough;
 
@@ -71,6 +71,19 @@ public class TerminalEmulator
     public void Resize(int cols, int rows)
     {
         Buffer.Resize(cols, rows);
+    }
+
+    /// <summary>
+    /// Erases from the current cursor position to end-of-screen (equivalent to ED 0).
+    /// Used to clean up visual artifacts left by TUI applications that exit without
+    /// proper cleanup (e.g., ConPTY may not relay all erase sequences from inline-
+    /// rendering TUI frameworks like ink).
+    /// </summary>
+    public void EraseBelow()
+    {
+        var fill = new CellData(' ', CellData.DefaultFgR, CellData.DefaultFgG, CellData.DefaultFgB,
+                                CellData.DefaultBgR, CellData.DefaultBgG, CellData.DefaultBgB);
+        EraseCells(Buffer.CursorRow, Buffer.CursorCol, Buffer.Rows - 1, Buffer.Columns - 1, fill);
     }
 
     /// <summary>
@@ -203,6 +216,36 @@ public class TerminalEmulator
                         break;
                     case 25:   // DECTCEM — Show/Hide Cursor
                         CursorEnabled = set;
+                        break;
+                    case 47:   // Alternate Screen Buffer (switch only, no cursor save/clear)
+                    case 1047: // Alternate Screen Buffer (switch + clear on enter)
+                        _events?.Log(this, $"DECSET {mode} AlternateScreen={set}", category: "Terminal");
+                        if (set && !AlternateScreen)
+                        {
+                            _savedScreen = new CellData[Buffer.Rows, Buffer.Columns];
+                            for (int r = 0; r < Buffer.Rows; r++)
+                                for (int c = 0; c < Buffer.Columns; c++)
+                                    _savedScreen[r, c] = Buffer.GetCell(r, c);
+                            _savedScrollOffset = Buffer.ScrollOffset;
+                            if (mode == 1047) Buffer.Clear();
+                            Buffer.SuppressScrollback = true;
+                            AlternateScreen = true;
+                        }
+                        else if (!set && AlternateScreen)
+                        {
+                            if (_savedScreen != null)
+                            {
+                                int rows = Math.Min(Buffer.Rows, _savedScreen.GetLength(0));
+                                int cols = Math.Min(Buffer.Columns, _savedScreen.GetLength(1));
+                                for (int r = 0; r < rows; r++)
+                                    for (int c = 0; c < cols; c++)
+                                        Buffer.SetCell(r, c, _savedScreen[r, c]);
+                                _savedScreen = null;
+                            }
+                            Buffer.ScrollOffset = _savedScrollOffset;
+                            Buffer.SuppressScrollback = false;
+                            AlternateScreen = false;
+                        }
                         break;
                     case 1049: // Alternate Screen Buffer (save cursor + switch + clear)
                         _events?.Log(this, $"DECSET 1049 AlternateScreen={set}", category: "Terminal");
@@ -562,8 +605,8 @@ public class TerminalEmulator
                 case 34: (_fgR, _fgG, _fgB) = (36, 114, 200); break;
                 case 35: (_fgR, _fgG, _fgB) = (188, 63, 188); break;
                 case 36: (_fgR, _fgG, _fgB) = (17, 168, 205); break;
-                case 37: (_fgR, _fgG, _fgB) = (204, 204, 204); break;
-                case 39: (_fgR, _fgG, _fgB) = (204, 204, 204); break; // default fg
+                case 37: (_fgR, _fgG, _fgB) = (CellData.DefaultFgR, CellData.DefaultFgG, CellData.DefaultFgB); break;
+                case 39: (_fgR, _fgG, _fgB) = (CellData.DefaultFgR, CellData.DefaultFgG, CellData.DefaultFgB); break; // default fg
 
                 // Bright foreground colors
                 case 90: (_fgR, _fgG, _fgB) = (118, 118, 118); break;
@@ -584,7 +627,7 @@ public class TerminalEmulator
                 case 45: (_bgR, _bgG, _bgB) = (188, 63, 188); break;
                 case 46: (_bgR, _bgG, _bgB) = (17, 168, 205); break;
                 case 47: (_bgR, _bgG, _bgB) = (204, 204, 204); break;
-                case 49: (_bgR, _bgG, _bgB) = (33, 33, 33); break; // default bg
+                case 49: (_bgR, _bgG, _bgB) = (CellData.DefaultBgR, CellData.DefaultBgG, CellData.DefaultBgB); break; // default bg
 
                 // Bright background colors
                 case 100: (_bgR, _bgG, _bgB) = (118, 118, 118); break;
@@ -629,8 +672,8 @@ public class TerminalEmulator
 
     private void ResetSgr()
     {
-        _fgR = 204; _fgG = 204; _fgB = 204;
-        _bgR = 33; _bgG = 33; _bgB = 33;
+        _fgR = CellData.DefaultFgR; _fgG = CellData.DefaultFgG; _fgB = CellData.DefaultFgB;
+        _bgR = CellData.DefaultBgR; _bgG = CellData.DefaultBgG; _bgB = CellData.DefaultBgB;
         _bold = false; _italic = false; _underline = false;
         _reverse = false; _dim = false; _strikethrough = false;
     }

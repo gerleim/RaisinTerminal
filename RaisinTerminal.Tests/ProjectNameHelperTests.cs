@@ -8,6 +8,8 @@ public class ProjectNameHelperTests
     [Theory]
     [InlineData("RaisinTerminal", "RT")]
     [InlineData("StockRaisin2", "SR2")]
+    [InlineData("StockRaisin23", "SR23")]
+    [InlineData("MyApp456", "MA456")]
     [InlineData("MyApp", "MA")]
     [InlineData("HelloWorld", "HW")]
     public void Abbreviate_CamelCase_ExtractsCapitalsAndTrailingDigits(string name, string expected)

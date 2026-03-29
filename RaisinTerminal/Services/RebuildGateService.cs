@@ -66,7 +66,7 @@ public sealed class RebuildGateService : IDisposable
 
                     // Gracefully close the main window on the UI thread
                     // This triggers OnClosing → SaveLayout → session IDs are persisted
-                    System.Windows.Application.Current.Dispatcher.BeginInvoke(() =>
+                    _ = System.Windows.Application.Current.Dispatcher.BeginInvoke(() =>
                     {
                         System.Windows.Application.Current.MainWindow?.Close();
                     });
@@ -104,7 +104,7 @@ public sealed class RebuildGateService : IDisposable
             foreach (var doc in _documents)
             {
                 if (doc is TerminalSessionViewModel session &&
-                    ProjectsPanelViewModel.DetermineStatus(session) == TerminalStatus.Working)
+                    ProjectsPanelViewModel.DetermineStatus(session) is TerminalStatus.Working or TerminalStatus.AgentsRunning)
                 {
                     // Session is actively working (not just idle at a prompt)
                     busy++;

@@ -257,13 +257,17 @@ public partial class TerminalView : UserControl
 
             // Begin input suppression after /clear is submitted during a Claude session,
             // so no keystrokes leak before the title-change callback triggers SendRenameAfterClear.
-            // Deferred via BeginInvoke so the Enter keypress that submits /clear is sent first.
+            // Send Enter explicitly here then suppress immediately — Dispatcher.BeginInvoke
+            // would leave a gap where fast keystrokes leak through unsuppressed.
             if (command.Trim().Equals("/clear", StringComparison.OrdinalIgnoreCase) &&
                 !string.IsNullOrEmpty(_vm.ClaudeSessionName) &&
                 _vm.HasRunningCommand &&
                 string.Equals(_vm.RunningChildName, "claude", StringComparison.OrdinalIgnoreCase))
             {
-                Dispatcher.BeginInvoke(_vm.BeginInputSuppression);
+                _vm.WriteUserInput(InputEncoder.EncodeKey(ConsoleKey.Enter));
+                _vm.BeginInputSuppression();
+                e.Handled = true;
+                return;
             }
         }
 

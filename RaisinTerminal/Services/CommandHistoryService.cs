@@ -1,4 +1,5 @@
 using System.IO;
+using System.Threading;
 
 namespace RaisinTerminal.Services;
 
@@ -14,6 +15,7 @@ public class CommandHistoryService
     private const int MaxEntries = 500;
     private readonly List<string> _history = [];
     private int _index;
+    private Timer? _saveTimer;
 
     public static CommandHistoryService Instance { get; } = new();
 
@@ -35,7 +37,7 @@ public class CommandHistoryService
             _history.RemoveAt(0);
 
         ResetNavigation();
-        Save();
+        ScheduleSave();
     }
 
     /// <summary>Navigate to the previous (older) entry. Returns null if at the beginning.</summary>
@@ -60,6 +62,20 @@ public class CommandHistoryService
     }
 
     public void ResetNavigation() => _index = _history.Count;
+
+    /// <summary>Saves history to disk immediately. Call on app exit.</summary>
+    public void SaveNow()
+    {
+        _saveTimer?.Dispose();
+        _saveTimer = null;
+        Save();
+    }
+
+    private void ScheduleSave()
+    {
+        _saveTimer?.Dispose();
+        _saveTimer = new Timer(_ => Save(), null, 5000, Timeout.Infinite);
+    }
 
     private void Load()
     {

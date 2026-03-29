@@ -180,7 +180,7 @@ public class MainViewModel : ViewModelBase, IDisposable
             {
                 var homePath = projectNode.HomePath;
                 if (!string.IsNullOrEmpty(homePath) &&
-                    workingDir.StartsWith(homePath, StringComparison.OrdinalIgnoreCase))
+                    PathHelper.IsSubPath(workingDir, homePath))
                 {
                     projectHomePath = homePath;
                     projectName = projectNode.Name;
@@ -214,7 +214,7 @@ public class MainViewModel : ViewModelBase, IDisposable
         {
             var homePath = projectNode.HomePath;
             if (!string.IsNullOrEmpty(homePath) &&
-                workingDir.StartsWith(homePath, StringComparison.OrdinalIgnoreCase))
+                PathHelper.IsSubPath(workingDir, homePath))
             {
                 return projectNode.Name;
             }

@@ -17,6 +17,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\RaisinTerminal.Core\RaisinTerminal.Core.csproj" />
+    <ProjectReference Include="..\RaisinTerminal\RaisinTerminal.csproj" />
   </ItemGroup>
 
 </Project>

@@ -5,10 +5,13 @@ namespace RaisinTerminal.Core.Models;
 /// </summary>
 public readonly record struct CellData(
     char Character,
-    byte ForegroundR = 204, byte ForegroundG = 204, byte ForegroundB = 204,
-    byte BackgroundR = 33, byte BackgroundG = 33, byte BackgroundB = 33,
+    byte ForegroundR = CellData.DefaultFgR, byte ForegroundG = CellData.DefaultFgG, byte ForegroundB = CellData.DefaultFgB,
+    byte BackgroundR = CellData.DefaultBgR, byte BackgroundG = CellData.DefaultBgG, byte BackgroundB = CellData.DefaultBgB,
     bool Bold = false, bool Italic = false, bool Underline = false,
     bool Reverse = false, bool Dim = false, bool Strikethrough = false)
 {
+    public const byte DefaultFgR = 204, DefaultFgG = 204, DefaultFgB = 204;
+    public const byte DefaultBgR = 33, DefaultBgG = 33, DefaultBgB = 33;
+
     public static readonly CellData Empty = new(' ');
 }

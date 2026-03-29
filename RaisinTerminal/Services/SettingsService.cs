@@ -7,7 +7,7 @@ public class AppSettings
 {
     public bool AutoDeleteAttachments { get; set; }
     public int AutoDeleteAttachmentsDays { get; set; } = 30;
-    public bool CompressEmptyLines { get; set; } = true;
+    public bool CompressEmptyLines { get; set; }
 }
 
 public static class SettingsService

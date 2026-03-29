@@ -5,6 +5,8 @@ using System.Windows.Input;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using Raisin.WPF.Base;
+using RaisinTerminal.Core.Helpers;
+using RaisinTerminal.Core.Models;
 using RaisinTerminal.Core.Terminal;
 
 namespace RaisinTerminal.ViewModels;
@@ -20,6 +22,13 @@ public class TerminalSessionViewModel : ToolWindowViewModel
     private int _inputSuppressionCount;
     private readonly Queue<byte[]> _inputQueue = new();
     private bool _claudeReady;
+
+    // TUI exit cleanup: track child process in the output loop to detect Claude exit.
+    // Uses a timed window (not one-shot) because ConPTY sends output in multiple
+    // batches — a later batch can re-introduce artifacts after a single cleanup pass.
+    private string? _outputLoopChildName;
+    private DateTime _lastChildCheckTime;
+    private DateTime? _claudeExitTime;
 
     public ICommand CloseCommand { get; }
     public TerminalEmulator? Emulator => _emulator;
@@ -59,13 +68,29 @@ public class TerminalSessionViewModel : ToolWindowViewModel
     public string? PendingTitle { get; set; }
 
     /// <summary>Whether the shell has a child process running (e.g. nslookup, claude, python).</summary>
-    public bool HasRunningCommand => _conPty?.HasChildProcesses() ?? false;
+    public bool HasRunningCommand { get { RefreshProcessCache(); return _cachedHasRunning; } }
 
     /// <summary>The executable name of the running child process (e.g. "claude", "python"), or null.</summary>
-    public string? RunningChildName => _conPty?.GetChildProcessName();
+    public string? RunningChildName { get { RefreshProcessCache(); return _cachedChildName; } }
 
     /// <summary>The PID of the running child process, or 0 if none.</summary>
-    public int RunningChildPid => _conPty?.GetChildProcessInfo().Pid ?? 0;
+    public int RunningChildPid { get { RefreshProcessCache(); return _cachedChildPid; } }
+
+    private bool _cachedHasRunning;
+    private string? _cachedChildName;
+    private int _cachedChildPid;
+    private DateTime _processCacheTime;
+    private static readonly TimeSpan ProcessCacheTTL = TimeSpan.FromMilliseconds(500);
+
+    private void RefreshProcessCache()
+    {
+        if (DateTime.UtcNow - _processCacheTime < ProcessCacheTTL) return;
+        var (name, pid) = _conPty?.GetChildProcessInfo() ?? (null, 0);
+        _cachedHasRunning = name != null;
+        _cachedChildName = name;
+        _cachedChildPid = pid;
+        _processCacheTime = DateTime.UtcNow;
+    }
 
     /// <summary>Command to replay after session starts (set during restore).</summary>
     public string? RestoreCommand { get; set; }
@@ -183,17 +208,13 @@ public class TerminalSessionViewModel : ToolWindowViewModel
                                 if (!string.IsNullOrEmpty(generated))
                                 {
                                     ClaudeSessionName = generated;
-#pragma warning disable CS4014 // Fire-and-forget is intentional
                                     SendRenameAfterClear(generated);
-#pragma warning restore CS4014
                                 }
                             }
                             else
                             {
                                 // Restored session with pre-set name — rename to it
-#pragma warning disable CS4014 // Fire-and-forget is intentional
                                 SendRenameAfterClear(ClaudeSessionName);
-#pragma warning restore CS4014
                             }
                         }
                         else
@@ -201,9 +222,7 @@ public class TerminalSessionViewModel : ToolWindowViewModel
                             // /clear detected — re-rename with stored name
                             if (!string.IsNullOrEmpty(ClaudeSessionName))
                             {
-#pragma warning disable CS4014 // Fire-and-forget is intentional
                                 SendRenameAfterClear(ClaudeSessionName);
-#pragma warning restore CS4014
                             }
                         }
                     }
@@ -276,28 +295,8 @@ public class TerminalSessionViewModel : ToolWindowViewModel
         }
     }
 
-    /// <summary>
-    /// Extracts the session name from a Claude title. Handles both plain "Claude Code"
-    /// and glyphed titles like "⏵ Claude Code" or "✻ SessionName".
-    /// Also handles bare session names like "RT 3" (no glyph prefix).
-    /// </summary>
-    private static string? ExtractClaudeTitleName(string title)
-    {
-        if (title.Equals("Claude Code", StringComparison.OrdinalIgnoreCase))
-            return "Claude Code";
-        var spaceIdx = title.IndexOf(' ');
-        if (spaceIdx < 0 || spaceIdx >= title.Length - 1)
-            return null;
-
-        // Check if the prefix before the space is a single non-alphanumeric code point
-        // (a status glyph like ✻, ⏵, ·, 🤖). If so, strip it. Otherwise the entire
-        // title is the session name (e.g. "RT 3").
-        bool isSingleCodePoint = spaceIdx == 1 || (spaceIdx == 2 && char.IsHighSurrogate(title[0]));
-        if (isSingleCodePoint && !char.IsLetterOrDigit(title[0]))
-            return title[(spaceIdx + 1)..];
-
-        return title;
-    }
+    private static string? ExtractClaudeTitleName(string title) =>
+        ClaudeTitleHelper.ExtractSessionName(title);
 
     /// <summary>
     /// Polls the screen buffer waiting for the Claude resume session picker to appear,
@@ -345,14 +344,14 @@ public class TerminalSessionViewModel : ToolWindowViewModel
         }, TaskScheduler.FromCurrentSynchronizationContext());
     }
 
-    private async Task SendRenameAfterClear(string sessionName)
+    private void SendRenameAfterClear(string sessionName)
     {
         _inputSuppressionCount++;
-        try
-        {
-            // Wait for Claude to finish processing /clear and show its prompt
-            await Task.Delay(1500);
+        var scheduler = TaskScheduler.FromCurrentSynchronizationContext();
 
+        // Wait for Claude to finish processing /clear and show its prompt
+        Task.Delay(1500).ContinueWith(_ =>
+        {
             // Re-verify Claude is still running and hasn't been manually renamed
             if (!string.IsNullOrEmpty(ClaudeSessionName) &&
                 HasRunningCommand &&
@@ -360,13 +359,15 @@ public class TerminalSessionViewModel : ToolWindowViewModel
             {
                 WriteInput(InputEncoder.EncodeText($"/rename {sessionName}\r"));
             }
-        }
-        finally
-        {
-            // Reset all suppression (covers both our own and the early suppression from the view)
-            _inputSuppressionCount = 0;
-            FlushInputQueue();
-        }
+
+            // Allow time for the rename command to be processed before releasing queued input
+            Task.Delay(500).ContinueWith(__ =>
+            {
+                // Reset all suppression (covers both our own and the early suppression from the view)
+                _inputSuppressionCount = 0;
+                FlushInputQueue();
+            }, scheduler);
+        }, scheduler);
     }
 
     /// <summary>
@@ -481,13 +482,156 @@ public class TerminalSessionViewModel : ToolWindowViewModel
 
                 LastOutputTime = DateTime.UtcNow;
 
+                // After draining all available output, check whether a TUI child
+                // (e.g. Claude Code) has just exited. ConPTY often fails to relay
+                // the TUI's inline cleanup sequences, leaving autocomplete/dropdown
+                // artifacts on screen. Erase from cursor to end-of-screen (ED 0)
+                // so the shell prompt renders cleanly.
+                CheckForTuiExitCleanup();
+
                 // Coalesce rendering: post at Render priority (below Input) so keyboard
                 // events are always processed before screen repaints during heavy output.
-                dispatcher.BeginInvoke(DispatcherPriority.Render, () => RenderRequested?.Invoke());
+                _ = dispatcher.BeginInvoke(DispatcherPriority.Render, () => RenderRequested?.Invoke());
             }
         }
         catch (OperationCanceledException) { }
-        catch (Exception) { }
+        catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"ReadOutputLoop: {ex}"); }
+    }
+
+    /// <summary>
+    /// Checks whether Claude Code has recently exited and runs artifact cleanup.
+    /// Uses a timed window (not one-shot) because ConPTY sends output in multiple
+    /// batches — a later batch can re-introduce artifacts after a single cleanup pass.
+    /// Throttled to avoid excessive ToolHelp32 snapshots.
+    /// </summary>
+    private void CheckForTuiExitCleanup()
+    {
+        var now = DateTime.UtcNow;
+        if (now - _lastChildCheckTime < TimeSpan.FromMilliseconds(300)) return;
+        _lastChildCheckTime = now;
+
+        var (childName, _) = _conPty?.GetChildProcessInfo() ?? (null, 0);
+        var prevName = _outputLoopChildName;
+        _outputLoopChildName = childName;
+
+        // Detect Claude exit → start cleanup window
+        if (string.Equals(prevName, "claude", StringComparison.OrdinalIgnoreCase) && childName == null)
+            _claudeExitTime = now;
+
+        // Run cleanup repeatedly during a 2-second window after Claude exits
+        if (!_claudeExitTime.HasValue) return;
+        if (now - _claudeExitTime.Value > TimeSpan.FromSeconds(2))
+        {
+            _claudeExitTime = null;
+            return;
+        }
+
+        lock (_lock)
+        {
+            RunClaudeArtifactCleanup();
+        }
+    }
+
+    /// <summary>
+    /// Erases visual artifacts left by Claude Code's inline TUI after exit.
+    /// ConPTY often rewrites lines at col 0 without erasing trailing old content,
+    /// leaving autocomplete dropdown text mixed into the exit output.
+    /// </summary>
+    private void RunClaudeArtifactCleanup()
+    {
+        var buf = _emulator?.Buffer;
+        if (buf == null) return;
+
+        // Erase from cursor to end-of-screen (cleans artifacts at/below prompt)
+        _emulator!.EraseBelow();
+
+        // Scan lines above cursor for artifacts left by ConPTY's incomplete rewrites
+        var fill = new CellData(' ', CellData.DefaultFgR, CellData.DefaultFgG, CellData.DefaultFgB,
+                                CellData.DefaultBgR, CellData.DefaultBgG, CellData.DefaultBgB);
+        int removedCount = 0;
+        int firstRemovedRow = -1;
+
+        for (int row = buf.CursorRow - 1; row >= Math.Max(0, buf.CursorRow - 20); row--)
+        {
+            var sb = new StringBuilder(buf.Columns);
+            for (int col = 0; col < buf.Columns; col++)
+                sb.Append(buf.GetCell(row, col).Character);
+            string line = sb.ToString().TrimEnd();
+            string trimmed = line.TrimStart();
+
+            // Standalone autocomplete line: "/command   Description"
+            if (IsClaudeAutocompleteLine(trimmed))
+            {
+                for (int c = 0; c < buf.Columns; c++)
+                    buf.SetCell(row, c, fill);
+                removedCount++;
+                firstRemovedRow = row;
+                continue;
+            }
+
+            // Resume command with trailing artifact: claude --resume "name"  Artifact
+            if (trimmed.Contains("--resume", StringComparison.Ordinal))
+            {
+                int lastQuote = trimmed.LastIndexOf('"');
+                if (lastQuote > 0)
+                {
+                    int leadingSpaces = line.Length - line.TrimStart().Length;
+                    int eraseCol = leadingSpaces + lastQuote + 1;
+                    for (int c = eraseCol; c < buf.Columns; c++)
+                        buf.SetCell(row, c, fill);
+                }
+            }
+        }
+
+        // Compact: shift rows up to fill gaps left by erased autocomplete lines
+        if (removedCount > 0 && firstRemovedRow >= 0)
+        {
+            int regionEnd = buf.CursorRow;
+            int writeRow = firstRemovedRow;
+            for (int readRow = firstRemovedRow; readRow <= regionEnd; readRow++)
+            {
+                // Skip rows that were erased (now blank)
+                bool isBlank = true;
+                for (int c = 0; c < buf.Columns && isBlank; c++)
+                {
+                    char ch = buf.GetCell(readRow, c).Character;
+                    if (ch != ' ' && ch != '\0') isBlank = false;
+                }
+                if (isBlank && readRow < buf.CursorRow)
+                    continue;
+
+                if (writeRow != readRow)
+                {
+                    for (int c = 0; c < buf.Columns; c++)
+                        buf.SetCell(writeRow, c, buf.GetCell(readRow, c));
+                }
+                if (readRow == buf.CursorRow)
+                    buf.CursorRow = writeRow;
+                writeRow++;
+            }
+
+            // Clear vacated rows at the bottom of the compacted region
+            for (int r = writeRow; r <= regionEnd; r++)
+                for (int c = 0; c < buf.Columns; c++)
+                    buf.SetCell(r, c, fill);
+        }
+    }
+
+    /// <summary>
+    /// Returns true if the trimmed line matches Claude Code's autocomplete pattern:
+    /// "/command   Description text" (slash, word, 2+ spaces, then description).
+    /// </summary>
+    private static bool IsClaudeAutocompleteLine(string trimmed)
+    {
+        if (trimmed.Length < 4 || trimmed[0] != '/' || !char.IsLetter(trimmed[1]))
+            return false;
+        int i = 2;
+        while (i < trimmed.Length && (char.IsLetterOrDigit(trimmed[i]) || trimmed[i] == '-'))
+            i++;
+        if (i >= trimmed.Length) return false;
+        int spaces = 0;
+        while (i < trimmed.Length && trimmed[i] == ' ') { i++; spaces++; }
+        return spaces >= 2 && i < trimmed.Length && char.IsUpper(trimmed[i]);
     }
 
     /// <summary>

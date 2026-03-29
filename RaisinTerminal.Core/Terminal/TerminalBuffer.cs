@@ -1,3 +1,4 @@
+using RaisinTerminal.Core.Collections;
 using RaisinTerminal.Core.Models;
 
 namespace RaisinTerminal.Core.Terminal;
@@ -7,7 +8,7 @@ namespace RaisinTerminal.Core.Terminal;
 /// </summary>
 public class TerminalBuffer
 {
-    private readonly List<CellData[]> _scrollback = [];
+    private CircularBuffer<CellData[]> _scrollback;
     private CellData[,] _screen;
 
     public int Columns { get; private set; }
@@ -44,6 +45,7 @@ public class TerminalBuffer
         Rows = rows;
         ScrollTop = 0;
         ScrollBottom = rows - 1;
+        _scrollback = new CircularBuffer<CellData[]>(MaxScrollback);
         _screen = new CellData[rows, cols];
         Clear();
     }
@@ -154,18 +156,15 @@ public class TerminalBuffer
             var row = new CellData[Columns];
             for (int c = 0; c < Columns; c++)
                 row[c] = _screen[0, c];
-            _scrollback.Add(row);
+            bool evicted = _scrollback.Add(row);
             TotalLinesScrolled++;
 
             // Keep viewport stable when user is scrolled back
             if (ScrollOffset > 0)
-                ScrollOffset++;
-
-            if (_scrollback.Count > MaxScrollback)
             {
-                _scrollback.RemoveAt(0);
-                // Adjust scroll offset since a line was removed from the top
-                if (ScrollOffset > 0)
+                ScrollOffset++;
+                // If an old line was evicted, adjust back down
+                if (evicted)
                     ScrollOffset--;
             }
         }

@@ -8,6 +8,7 @@
         <SolidColorBrush x:Key="IdleBrush" Color="#888888"/>
         <SolidColorBrush x:Key="WorkingBrush" Color="#4EC862"/>
         <SolidColorBrush x:Key="WaitingBrush" Color="#E8A838"/>
+        <SolidColorBrush x:Key="AgentsRunningBrush" Color="#4EC8E8"/>
 
         <Style x:Key="TreeViewItemStyle" TargetType="TreeViewItem">
             <Setter Property="IsExpanded" Value="True"/>
@@ -66,6 +67,9 @@
                                         <DataTrigger Binding="{Binding Status}" Value="{x:Static vm:TerminalStatus.WaitingForInput}">
                                             <Setter Property="Visibility" Value="Collapsed"/>
                                         </DataTrigger>
+                                        <DataTrigger Binding="{Binding Status}" Value="{x:Static vm:TerminalStatus.AgentsRunning}">
+                                            <Setter Property="Visibility" Value="Collapsed"/>
+                                        </DataTrigger>
                                     </Style.Triggers>
                                 </Style>
                             </Grid.Style>
@@ -88,6 +92,20 @@
                                       StrokeStartLineCap="Round" StrokeEndLineCap="Flat"/>
                                 <Path Data="M 0.5,5.5 L 2,3 L 3.5,5.5 Z"
                                       Fill="{StaticResource WorkingBrush}"/>
+                            </Canvas>
+                        </Grid>
+
+                        <!-- AgentsRunning: Rotating circular arrow in cyan -->
+                        <Grid x:Name="AgentsRunningGrid" RenderTransformOrigin="0.5,0.5" Visibility="Collapsed">
+                            <Grid.RenderTransform>
+                                <RotateTransform/>
+                            </Grid.RenderTransform>
+                            <Canvas Width="12" Height="12">
+                                <Path Data="M 6,2 A 4,4 0 1 1 2,6"
+                                      Stroke="{StaticResource AgentsRunningBrush}" StrokeThickness="1.5"
+                                      StrokeStartLineCap="Round" StrokeEndLineCap="Flat"/>
+                                <Path Data="M 0.5,5.5 L 2,3 L 3.5,5.5 Z"
+                                      Fill="{StaticResource AgentsRunningBrush}"/>
                             </Canvas>
                         </Grid>
 
@@ -150,6 +168,22 @@
                     </DataTrigger.EnterActions>
                     <DataTrigger.ExitActions>
                         <StopStoryboard BeginStoryboardName="PulseStoryboard"/>
+                    </DataTrigger.ExitActions>
+                </DataTrigger>
+                <DataTrigger Binding="{Binding Status}" Value="{x:Static vm:TerminalStatus.AgentsRunning}">
+                    <Setter TargetName="AgentsRunningGrid" Property="Visibility" Value="Visible"/>
+                    <DataTrigger.EnterActions>
+                        <BeginStoryboard x:Name="AgentSpinStoryboard">
+                            <Storyboard>
+                                <DoubleAnimation Storyboard.TargetName="AgentsRunningGrid"
+                                                 Storyboard.TargetProperty="(UIElement.RenderTransform).(RotateTransform.Angle)"
+                                                 From="0" To="360" Duration="0:0:1.2"
+                                                 RepeatBehavior="Forever"/>
+                            </Storyboard>
+                        </BeginStoryboard>
+                    </DataTrigger.EnterActions>
+                    <DataTrigger.ExitActions>
+                        <StopStoryboard BeginStoryboardName="AgentSpinStoryboard"/>
                     </DataTrigger.ExitActions>
                 </DataTrigger>
             </DataTemplate.Triggers>

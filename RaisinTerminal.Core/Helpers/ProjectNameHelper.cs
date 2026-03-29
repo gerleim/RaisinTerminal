@@ -72,14 +72,12 @@ public static class ProjectNameHelper
                 chars.Add(name[i]);
         }
 
-        // Append trailing digits (e.g. StockRaisin2 → SR2)
-        for (int i = name.Length - 1; i >= 0; i--)
-        {
-            if (char.IsDigit(name[i]))
-                chars.Add(name[i]);
-            else
-                break;
-        }
+        // Append trailing digits (e.g. StockRaisin23 → SR23)
+        int digitStart = name.Length;
+        while (digitStart > 0 && char.IsDigit(name[digitStart - 1]))
+            digitStart--;
+        for (int i = digitStart; i < name.Length; i++)
+            chars.Add(name[i]);
 
         return chars.Count > 0 ? new string(chars.ToArray()) : name;
     }

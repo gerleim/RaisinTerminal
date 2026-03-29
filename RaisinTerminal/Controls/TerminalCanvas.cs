@@ -38,6 +38,9 @@ public class TerminalCanvas : FrameworkElement
     // Key: (character, typeface index 0-3, fg color).
     private readonly Dictionary<(char, byte, byte, byte, byte), FormattedText> _glyphCache = new();
 
+    // Brush cache: avoids per-cell allocations. Frozen brushes persist across frames.
+    private readonly Dictionary<(byte, byte, byte), Brush> _brushCache = new();
+
     public int Columns => _cellWidth > 0 ? (int)(ActualWidth / _cellWidth) : 0;
     public int Rows => _cellHeight > 0 ? (int)(ActualHeight / _cellHeight) : 0;
 
@@ -54,8 +57,8 @@ public class TerminalCanvas : FrameworkElement
     public (long Row, int Col)? SelectionStart { get; set; }
     public (long Row, int Col)? SelectionEnd { get; set; }
 
-    private static readonly Brush DefaultBg = new SolidColorBrush(Color.FromRgb(0x21, 0x21, 0x21));
-    private static readonly Brush CursorBrush = new SolidColorBrush(Color.FromRgb(0xCC, 0xCC, 0xCC));
+    private static readonly Brush DefaultBg = new SolidColorBrush(Color.FromRgb(CellData.DefaultBgR, CellData.DefaultBgG, CellData.DefaultBgB));
+    private static readonly Brush CursorBrush = new SolidColorBrush(Color.FromRgb(CellData.DefaultFgR, CellData.DefaultFgG, CellData.DefaultFgB));
     private static readonly Brush SelectionBrush;
 
     static TerminalCanvas()
@@ -93,6 +96,10 @@ public class TerminalCanvas : FrameworkElement
     {
         EnsureMeasured();
 
+        // Cap caches to prevent unbounded growth
+        if (_glyphCache.Count > 10_000) _glyphCache.Clear();
+        if (_brushCache.Count > 10_000) _brushCache.Clear();
+
         // Background
         dc.DrawRectangle(DefaultBg, null, new Rect(0, 0, ActualWidth, ActualHeight));
 
@@ -101,9 +108,6 @@ public class TerminalCanvas : FrameworkElement
 
         // Normalize selection range
         var (selStartRow, selStartCol, selEndRow, selEndCol) = GetNormalizedSelection();
-
-        // Brush cache to avoid per-cell allocations
-        var brushCache = new Dictionary<(byte, byte, byte), Brush>();
 
         int baseRowCount = Math.Min(buffer.Rows, Rows);
 
@@ -196,9 +200,9 @@ public class TerminalCanvas : FrameworkElement
                 }
 
                 // Draw cell background if not default
-                if (effBgR != 33 || effBgG != 33 || effBgB != 33)
+                if (effBgR != CellData.DefaultBgR || effBgG != CellData.DefaultBgG || effBgB != CellData.DefaultBgB)
                 {
-                    var bgBrush = GetCachedBrush(brushCache, effBgR, effBgG, effBgB);
+                    var bgBrush = GetCachedBrush(_brushCache, effBgR, effBgG, effBgB);
                     dc.DrawRectangle(bgBrush, null, new Rect(x, y, _cellWidth, rowH));
                 }
 
@@ -212,7 +216,7 @@ public class TerminalCanvas : FrameworkElement
                 // Draw character
                 if (cell.Character != ' ' && cell.Character != '\0')
                 {
-                    var fgBrush = GetCachedBrush(brushCache, effFgR, effFgG, effFgB);
+                    var fgBrush = GetCachedBrush(_brushCache, effFgR, effFgG, effFgB);
 
                     // Render block drawing characters as geometric primitives
                     // for pixel-perfect tiling (font glyphs often have gaps)
@@ -270,7 +274,7 @@ public class TerminalCanvas : FrameworkElement
             double cursorH = rowYPositions[displayCursorRow + 1] - cy;
 
             // Draw a block cursor with semi-transparent overlay
-            var cursorBlock = new SolidColorBrush(Color.FromArgb(0xA0, 0xCC, 0xCC, 0xCC));
+            var cursorBlock = new SolidColorBrush(Color.FromArgb(0xA0, CellData.DefaultFgR, CellData.DefaultFgG, CellData.DefaultFgB));
             cursorBlock.Freeze();
             dc.DrawRectangle(cursorBlock, null, new Rect(cx, cy, _cellWidth, cursorH));
         }
@@ -475,7 +479,7 @@ public class TerminalCanvas : FrameworkElement
             var cell = GetDisplayCell(buffer, displayRow, c, extraRows);
             if (cell.Character != ' ' && cell.Character != '\0' && cell.Character != '\u2502')
                 return false;
-            if (cell.BackgroundR != 33 || cell.BackgroundG != 33 || cell.BackgroundB != 33)
+            if (cell.BackgroundR != CellData.DefaultBgR || cell.BackgroundG != CellData.DefaultBgG || cell.BackgroundB != CellData.DefaultBgB)
                 return false;
         }
         return true;
@@ -489,7 +493,7 @@ public class TerminalCanvas : FrameworkElement
             var cell = buffer.GetVisibleCell(row, c);
             if (cell.Character != ' ' && cell.Character != '\0' && cell.Character != '\u2502')
                 return false;
-            if (cell.BackgroundR != 33 || cell.BackgroundG != 33 || cell.BackgroundB != 33)
+            if (cell.BackgroundR != CellData.DefaultBgR || cell.BackgroundG != CellData.DefaultBgG || cell.BackgroundB != CellData.DefaultBgB)
                 return false;
         }
         return true;

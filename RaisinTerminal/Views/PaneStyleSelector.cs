@@ -24,7 +24,6 @@ public class PaneStyleSelector : StyleSelector
             style.Setters.Add(new Setter(LayoutItem.CloseCommandProperty,
                 new RelayCommand(() =>
                 {
-                    vm.OnClose();
                     vm.CloseAction?.Invoke();
                 })));
 

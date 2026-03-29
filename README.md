@@ -2,6 +2,8 @@
 
 Windows terminal emulator with multi-pane layout and Claude Code session management.
 
+![RaisinTerminal screenshot](docs/screenshot.png)
+
 ## Features
 
 - **Full terminal emulation** — ConPTY-based with VT100/ANSI support, alternate screen buffer, scrollback, and Unicode block drawing

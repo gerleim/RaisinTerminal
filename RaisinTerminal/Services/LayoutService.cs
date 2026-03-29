@@ -5,6 +5,7 @@ using AvalonDock;
 using Raisin.Core;
 using Raisin.WPF.Base;
 using Raisin.WPF.Base.Models;
+using RaisinTerminal.Core.Helpers;
 
 namespace RaisinTerminal.Services;
 
@@ -54,24 +55,12 @@ public static class LayoutService
                         var title = doc.Title;
                         if (!string.IsNullOrEmpty(title))
                         {
-                            // Strip deduplication suffix added by RefreshTitles (e.g. " (2)")
-                            var dedupIdx = title.LastIndexOf(" (");
-                            var cleanTitle = dedupIdx >= 0 && title.EndsWith(')') ? title[..dedupIdx] : title;
-
-                            if (!cleanTitle.Equals("Claude Code", StringComparison.OrdinalIgnoreCase))
+                            var cleanTitle = ClaudeTitleHelper.StripDedupSuffix(title);
+                            var parsedName = ClaudeTitleHelper.ExtractSessionName(cleanTitle);
+                            if (parsedName != null &&
+                                !parsedName.Equals("Claude Code", StringComparison.OrdinalIgnoreCase))
                             {
-                                var spaceIdx = cleanTitle.IndexOf(' ');
-                                if (spaceIdx >= 0 && spaceIdx < cleanTitle.Length - 1)
-                                {
-                                    // Check if prefix is a single non-alphanumeric code point (status glyph).
-                                    // If so, strip it. Otherwise the title IS the session name (e.g. "RT 3").
-                                    bool isSingleCodePoint = spaceIdx == 1 ||
-                                        (spaceIdx == 2 && char.IsHighSurrogate(cleanTitle[0]));
-                                    if (isSingleCodePoint && !char.IsLetterOrDigit(cleanTitle[0]))
-                                        session.ClaudeSessionName = cleanTitle[(spaceIdx + 1)..];
-                                    else
-                                        session.ClaudeSessionName = cleanTitle;
-                                }
+                                session.ClaudeSessionName = parsedName;
                             }
                         }
                     }
