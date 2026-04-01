@@ -66,6 +66,16 @@ public static class AttachmentService
             .ToList();
     }
 
+    public static string? RenameAttachment(string filePath, string newFileName)
+    {
+        if (!File.Exists(filePath)) return null;
+        var dir = Path.GetDirectoryName(filePath)!;
+        var newPath = Path.Combine(dir, newFileName);
+        if (File.Exists(newPath)) return null;
+        File.Move(filePath, newPath);
+        return newPath;
+    }
+
     public static void DeleteAttachment(string filePath)
     {
         if (File.Exists(filePath))

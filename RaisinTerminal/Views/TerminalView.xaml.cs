@@ -20,6 +20,9 @@ public partial class TerminalView : UserControl
     private DateTime _lastUndoRedoTime;
     private bool _overlayActive;
     private bool _lastAlternateScreen;
+    private bool _searchActive;
+    private readonly TerminalSearchState _searchState = new();
+    private DispatcherTimer? _searchDebounceTimer;
 
     public TerminalView()
     {
@@ -30,6 +33,8 @@ public partial class TerminalView : UserControl
         VerticalScrollBar.Scroll += OnScrollBarScroll;
         Drop += OnFileDrop;
         DragOver += OnDragOver;
+        SearchInput.PreviewKeyDown += OnSearchInputKeyDown;
+        SearchInput.TextChanged += OnSearchTextChanged;
     }
 
     private void OnLoaded(object sender, RoutedEventArgs e)
@@ -72,6 +77,8 @@ public partial class TerminalView : UserControl
     {
         // Pick up any settings changes (e.g. after Options dialog)
         Canvas.CompressEmptyLines = SettingsService.Current.CompressEmptyLines;
+        if (_vm?.Emulator != null)
+            _vm.Emulator.AnsiLogging = SettingsService.Current.AnsiLogging;
         // Reset cursor to visible on new output
         Canvas.CursorVisible = true;
         _cursorTimer?.Stop();
@@ -85,6 +92,10 @@ public partial class TerminalView : UserControl
 
         UpdateScrollBar();
         Canvas.Invalidate();
+
+        // Refresh search matches if search is active (buffer content changed)
+        if (_searchActive && !string.IsNullOrEmpty(SearchInput.Text))
+            ExecuteSearch();
 
         // Show/hide input overlay on alternate screen transitions
         var altScreen = _vm?.Emulator?.AlternateScreen ?? false;
@@ -120,6 +131,21 @@ public partial class TerminalView : UserControl
     protected override void OnPreviewKeyDown(KeyEventArgs e)
     {
         if (_vm == null || !_vm.IsConnected) return;
+
+        // Ctrl+F → toggle search bar (works in any mode)
+        if ((Keyboard.Modifiers & ModifierKeys.Control) != 0 && e.Key == Key.F)
+        {
+            if (_searchActive)
+                CloseSearch();
+            else
+                OpenSearch();
+            e.Handled = true;
+            return;
+        }
+
+        // When search bar is active, let the SearchInput TextBox handle keys
+        if (_searchActive)
+            return;
 
         // When overlay is active, route keys to the overlay handler
         if (_overlayActive)
@@ -264,6 +290,7 @@ public partial class TerminalView : UserControl
                 _vm.HasRunningCommand &&
                 string.Equals(_vm.RunningChildName, "claude", StringComparison.OrdinalIgnoreCase))
             {
+                _vm.WriteTranscriptMarker("Session cleared (/clear)");
                 _vm.WriteUserInput(InputEncoder.EncodeKey(ConsoleKey.Enter));
                 _vm.BeginInputSuppression();
                 e.Handled = true;
@@ -333,8 +360,8 @@ public partial class TerminalView : UserControl
     {
         if (_vm == null || !_vm.IsConnected || string.IsNullOrEmpty(e.Text)) return;
 
-        // When overlay is active, let the TextBox handle text input natively
-        if (_overlayActive) return;
+        // When search bar or overlay is active, let the TextBox handle text input natively
+        if (_searchActive || _overlayActive) return;
 
         // Track typed characters for undo
         _vm.CurrentInputLine.Append(e.Text);
@@ -774,6 +801,182 @@ public partial class TerminalView : UserControl
 
         OverlayInput.Clear();
     }
+
+    // ─── Search (Ctrl+F) ──────────────────────────────────────────────────
+
+    private void OpenSearch()
+    {
+        _searchActive = true;
+        SearchOverlay.Visibility = Visibility.Visible;
+
+        // Pre-populate with selected text if single-line
+        if (Canvas.SelectionStart != null && Canvas.SelectionEnd != null)
+        {
+            var text = Canvas.GetSelectedText();
+            if (!string.IsNullOrEmpty(text) && !text.Contains('\n'))
+                SearchInput.Text = text;
+        }
+
+        SearchInput.Focus();
+        SearchInput.SelectAll();
+
+        if (!string.IsNullOrEmpty(SearchInput.Text))
+            ExecuteSearch();
+    }
+
+    private void CloseSearch()
+    {
+        _searchActive = false;
+        _searchDebounceTimer?.Stop();
+        SearchOverlay.Visibility = Visibility.Collapsed;
+        _searchState.Clear();
+        Canvas.SearchMatches = null;
+        Canvas.CurrentSearchMatch = null;
+        Canvas.Invalidate();
+        if (_overlayActive)
+            Dispatcher.BeginInvoke(() => OverlayInput.Focus(), DispatcherPriority.Input);
+        else
+            Dispatcher.BeginInvoke(() => Canvas.Focus(), DispatcherPriority.Input);
+    }
+
+    private void ExecuteSearch()
+    {
+        var query = SearchInput.Text;
+        if (string.IsNullOrEmpty(query))
+        {
+            _searchState.Clear();
+            UpdateSearchIndicator();
+            Canvas.SearchMatches = null;
+            Canvas.CurrentSearchMatch = null;
+            Canvas.Invalidate();
+            return;
+        }
+
+        _searchState.Query = query;
+        _searchState.Matches.Clear();
+        _searchState.Matches.AddRange(_vm!.SearchBuffer(query));
+
+        if (_searchState.MatchCount > 0)
+        {
+            var buffer = _vm!.Emulator?.Buffer;
+            if (buffer != null)
+            {
+                long viewTop = buffer.TotalLinesScrolled - buffer.ScrollOffset;
+                int idx = _searchState.Matches.FindIndex(m => m.AbsoluteRow >= viewTop);
+                _searchState.CurrentMatchIndex = idx >= 0 ? idx : 0;
+            }
+            else
+            {
+                _searchState.CurrentMatchIndex = 0;
+            }
+        }
+        else
+        {
+            _searchState.CurrentMatchIndex = -1;
+        }
+
+        UpdateSearchIndicator();
+        Canvas.SearchMatches = _searchState.Matches;
+        Canvas.CurrentSearchMatch = _searchState.CurrentMatch;
+        Canvas.Invalidate();
+    }
+
+    private void UpdateSearchIndicator()
+    {
+        if (_searchState.MatchCount == 0)
+            SearchResultsIndicator.Text = string.IsNullOrEmpty(_searchState.Query) ? "" : "0/0";
+        else
+            SearchResultsIndicator.Text = $"{_searchState.CurrentMatchIndex + 1}/{_searchState.MatchCount}";
+    }
+
+    private void NavigateSearchNext()
+    {
+        if (_searchState.MatchCount == 0) return;
+        _searchState.CurrentMatchIndex = (_searchState.CurrentMatchIndex + 1) % _searchState.MatchCount;
+        ScrollToCurrentMatch();
+        UpdateSearchIndicator();
+        Canvas.CurrentSearchMatch = _searchState.CurrentMatch;
+        Canvas.Invalidate();
+    }
+
+    private void NavigateSearchPrevious()
+    {
+        if (_searchState.MatchCount == 0) return;
+        _searchState.CurrentMatchIndex = (_searchState.CurrentMatchIndex - 1 + _searchState.MatchCount) % _searchState.MatchCount;
+        ScrollToCurrentMatch();
+        UpdateSearchIndicator();
+        Canvas.CurrentSearchMatch = _searchState.CurrentMatch;
+        Canvas.Invalidate();
+    }
+
+    private void ScrollToCurrentMatch()
+    {
+        var match = _searchState.CurrentMatch;
+        if (match == null || _vm?.Emulator?.Buffer == null) return;
+
+        var buffer = _vm.Emulator.Buffer;
+        long matchAbsRow = match.Value.AbsoluteRow;
+
+        // Check if match is already visible
+        long viewTop = buffer.TotalLinesScrolled - buffer.ScrollOffset;
+        long viewBottom = viewTop + buffer.Rows - 1;
+
+        if (matchAbsRow >= viewTop && matchAbsRow <= viewBottom)
+            return;
+
+        // Place match in the middle of the viewport
+        int targetOffset = (int)(buffer.TotalLinesScrolled - matchAbsRow + buffer.Rows / 2);
+        buffer.ScrollOffset = Math.Clamp(targetOffset, 0, buffer.ScrollbackCount);
+        _userScrolledBack = buffer.ScrollOffset > 0;
+        UpdateScrollBar();
+    }
+
+    private void OnSearchInputKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Escape)
+        {
+            CloseSearch();
+            e.Handled = true;
+        }
+        else if (e.Key == Key.Enter)
+        {
+            bool shift = (Keyboard.Modifiers & ModifierKeys.Shift) != 0;
+            if (shift) NavigateSearchPrevious();
+            else NavigateSearchNext();
+            e.Handled = true;
+        }
+        else if (e.Key == Key.Up)
+        {
+            NavigateSearchPrevious();
+            e.Handled = true;
+        }
+        else if (e.Key == Key.Down)
+        {
+            NavigateSearchNext();
+            e.Handled = true;
+        }
+    }
+
+    private void OnSearchTextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (_searchDebounceTimer == null)
+        {
+            _searchDebounceTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(150) };
+            _searchDebounceTimer.Tick += OnSearchDebounce;
+        }
+        _searchDebounceTimer.Stop();
+        _searchDebounceTimer.Start();
+    }
+
+    private void OnSearchDebounce(object? sender, EventArgs e)
+    {
+        _searchDebounceTimer!.Stop();
+        ExecuteSearch();
+    }
+
+    private void OnSearchUp(object sender, RoutedEventArgs e) => NavigateSearchPrevious();
+    private void OnSearchDown(object sender, RoutedEventArgs e) => NavigateSearchNext();
+    private void OnSearchClose(object sender, RoutedEventArgs e) => CloseSearch();
 
     private static ConsoleKey? MapKey(Key key)
     {

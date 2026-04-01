@@ -8,6 +8,9 @@ public class AppSettings
     public bool AutoDeleteAttachments { get; set; }
     public int AutoDeleteAttachmentsDays { get; set; } = 30;
     public bool CompressEmptyLines { get; set; }
+    public bool AlertOnWaitingForInput { get; set; } = true;
+    public string AlertSound { get; set; } = "system:Beep";
+    public bool AnsiLogging { get; set; }
 }
 
 public static class SettingsService

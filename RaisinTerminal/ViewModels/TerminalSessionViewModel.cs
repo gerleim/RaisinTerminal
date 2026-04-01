@@ -8,6 +8,7 @@ using Raisin.WPF.Base;
 using RaisinTerminal.Core.Helpers;
 using RaisinTerminal.Core.Models;
 using RaisinTerminal.Core.Terminal;
+using RaisinTerminal.Services;
 
 namespace RaisinTerminal.ViewModels;
 
@@ -22,6 +23,7 @@ public class TerminalSessionViewModel : ToolWindowViewModel
     private int _inputSuppressionCount;
     private readonly Queue<byte[]> _inputQueue = new();
     private bool _claudeReady;
+    private SessionTranscriptLogger? _transcriptLogger;
 
     // TUI exit cleanup: track child process in the output loop to detect Claude exit.
     // Uses a timed window (not one-shot) because ConPTY sends output in multiple
@@ -117,6 +119,50 @@ public class TerminalSessionViewModel : ToolWindowViewModel
     }
 
     /// <summary>
+    /// Searches the entire buffer (scrollback + screen) for the given text.
+    /// Returns results sorted by position (top to bottom, left to right).
+    /// Thread-safe (acquires _lock).
+    /// </summary>
+    public List<SearchMatch> SearchBuffer(string query)
+    {
+        var results = new List<SearchMatch>();
+        if (string.IsNullOrEmpty(query)) return results;
+
+        lock (_lock)
+        {
+            var buf = _emulator?.Buffer;
+            if (buf == null) return results;
+
+            // Search scrollback lines
+            for (int i = 0; i < buf.ScrollbackCount; i++)
+            {
+                string lineText = buf.GetScrollbackLineText(i);
+                long absRow = buf.TotalLinesScrolled - buf.ScrollbackCount + i;
+                FindMatchesInLine(lineText, query, absRow, results);
+            }
+
+            // Search screen lines
+            for (int row = 0; row < buf.Rows; row++)
+            {
+                string lineText = buf.GetScreenLineText(row);
+                long absRow = buf.TotalLinesScrolled + row;
+                FindMatchesInLine(lineText, query, absRow, results);
+            }
+        }
+        return results;
+    }
+
+    private static void FindMatchesInLine(string line, string query, long absRow, List<SearchMatch> results)
+    {
+        int idx = 0;
+        while ((idx = line.IndexOf(query, idx, StringComparison.OrdinalIgnoreCase)) >= 0)
+        {
+            results.Add(new SearchMatch(absRow, idx, query.Length));
+            idx += 1; // allow overlapping matches
+        }
+    }
+
+    /// <summary>
     /// Returns the cursor row on the live screen, or -1 if not available.
     /// </summary>
     public int CursorRow
@@ -175,6 +221,15 @@ public class TerminalSessionViewModel : ToolWindowViewModel
         rows = Math.Max(rows, 5);
 
         _emulator = new TerminalEmulator(cols, rows, App.Events);
+        _emulator.AnsiLogging = SettingsService.Current.AnsiLogging;
+
+        var sessionsDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "RaisinTerminal", "sessions");
+        _transcriptLogger = new SessionTranscriptLogger(sessionsDir, ContentId);
+        _transcriptLogger.WriteMarker(RestoreCommand != null ? "Session restored" : "Session started");
+        _emulator.TranscriptLogger = _transcriptLogger;
+
         _emulator.TitleChanged += title =>
         {
             Dispatcher.CurrentDispatcher.BeginInvoke(() =>
@@ -444,6 +499,11 @@ public class TerminalSessionViewModel : ToolWindowViewModel
         var dispatcher = System.Windows.Application.Current?.Dispatcher;
         if (dispatcher == null) return;
 
+        // DEC 2026 synchronized output: track when sync mode was entered
+        // so we can force a render if the app never sends the reset sequence.
+        const int SyncTimeoutMs = 200;
+        DateTime syncStartTime = default;
+
         try
         {
             Task<int>? pendingRead = null;
@@ -454,6 +514,7 @@ public class TerminalSessionViewModel : ToolWindowViewModel
                 pendingRead = null;
                 if (read == 0) break;
 
+                _transcriptLogger?.WriteRaw(buf, 0, read);
                 lock (_lock)
                 {
                     _emulator?.Feed(buf.AsSpan(0, read));
@@ -474,6 +535,7 @@ public class TerminalSessionViewModel : ToolWindowViewModel
                     pendingRead = null;
                     if (read == 0) return;
 
+                    _transcriptLogger?.WriteRaw(buf, 0, read);
                     lock (_lock)
                     {
                         _emulator?.Feed(buf.AsSpan(0, read));
@@ -481,6 +543,20 @@ public class TerminalSessionViewModel : ToolWindowViewModel
                 }
 
                 LastOutputTime = DateTime.UtcNow;
+
+                // DEC 2026 synchronized output: the app has told us it's mid-update.
+                // Defer rendering until the reset sequence arrives (CSI ?2026l),
+                // or until the safety timeout expires to avoid a frozen screen.
+                bool synced = _emulator?.SynchronizedOutput ?? false;
+                if (synced)
+                {
+                    if (syncStartTime == default)
+                        syncStartTime = DateTime.UtcNow;
+
+                    if ((DateTime.UtcNow - syncStartTime).TotalMilliseconds < SyncTimeoutMs)
+                        continue; // skip render, keep reading
+                }
+                syncStartTime = default;
 
                 // After draining all available output, check whether a TUI child
                 // (e.g. Claude Code) has just exited. ConPTY often fails to relay
@@ -532,106 +608,10 @@ public class TerminalSessionViewModel : ToolWindowViewModel
         }
     }
 
-    /// <summary>
-    /// Erases visual artifacts left by Claude Code's inline TUI after exit.
-    /// ConPTY often rewrites lines at col 0 without erasing trailing old content,
-    /// leaving autocomplete dropdown text mixed into the exit output.
-    /// </summary>
     private void RunClaudeArtifactCleanup()
     {
-        var buf = _emulator?.Buffer;
-        if (buf == null) return;
-
-        // Erase from cursor to end-of-screen (cleans artifacts at/below prompt)
-        _emulator!.EraseBelow();
-
-        // Scan lines above cursor for artifacts left by ConPTY's incomplete rewrites
-        var fill = new CellData(' ', CellData.DefaultFgR, CellData.DefaultFgG, CellData.DefaultFgB,
-                                CellData.DefaultBgR, CellData.DefaultBgG, CellData.DefaultBgB);
-        int removedCount = 0;
-        int firstRemovedRow = -1;
-
-        for (int row = buf.CursorRow - 1; row >= Math.Max(0, buf.CursorRow - 20); row--)
-        {
-            var sb = new StringBuilder(buf.Columns);
-            for (int col = 0; col < buf.Columns; col++)
-                sb.Append(buf.GetCell(row, col).Character);
-            string line = sb.ToString().TrimEnd();
-            string trimmed = line.TrimStart();
-
-            // Standalone autocomplete line: "/command   Description"
-            if (IsClaudeAutocompleteLine(trimmed))
-            {
-                for (int c = 0; c < buf.Columns; c++)
-                    buf.SetCell(row, c, fill);
-                removedCount++;
-                firstRemovedRow = row;
-                continue;
-            }
-
-            // Resume command with trailing artifact: claude --resume "name"  Artifact
-            if (trimmed.Contains("--resume", StringComparison.Ordinal))
-            {
-                int lastQuote = trimmed.LastIndexOf('"');
-                if (lastQuote > 0)
-                {
-                    int leadingSpaces = line.Length - line.TrimStart().Length;
-                    int eraseCol = leadingSpaces + lastQuote + 1;
-                    for (int c = eraseCol; c < buf.Columns; c++)
-                        buf.SetCell(row, c, fill);
-                }
-            }
-        }
-
-        // Compact: shift rows up to fill gaps left by erased autocomplete lines
-        if (removedCount > 0 && firstRemovedRow >= 0)
-        {
-            int regionEnd = buf.CursorRow;
-            int writeRow = firstRemovedRow;
-            for (int readRow = firstRemovedRow; readRow <= regionEnd; readRow++)
-            {
-                // Skip rows that were erased (now blank)
-                bool isBlank = true;
-                for (int c = 0; c < buf.Columns && isBlank; c++)
-                {
-                    char ch = buf.GetCell(readRow, c).Character;
-                    if (ch != ' ' && ch != '\0') isBlank = false;
-                }
-                if (isBlank && readRow < buf.CursorRow)
-                    continue;
-
-                if (writeRow != readRow)
-                {
-                    for (int c = 0; c < buf.Columns; c++)
-                        buf.SetCell(writeRow, c, buf.GetCell(readRow, c));
-                }
-                if (readRow == buf.CursorRow)
-                    buf.CursorRow = writeRow;
-                writeRow++;
-            }
-
-            // Clear vacated rows at the bottom of the compacted region
-            for (int r = writeRow; r <= regionEnd; r++)
-                for (int c = 0; c < buf.Columns; c++)
-                    buf.SetCell(r, c, fill);
-        }
-    }
-
-    /// <summary>
-    /// Returns true if the trimmed line matches Claude Code's autocomplete pattern:
-    /// "/command   Description text" (slash, word, 2+ spaces, then description).
-    /// </summary>
-    private static bool IsClaudeAutocompleteLine(string trimmed)
-    {
-        if (trimmed.Length < 4 || trimmed[0] != '/' || !char.IsLetter(trimmed[1]))
-            return false;
-        int i = 2;
-        while (i < trimmed.Length && (char.IsLetterOrDigit(trimmed[i]) || trimmed[i] == '-'))
-            i++;
-        if (i >= trimmed.Length) return false;
-        int spaces = 0;
-        while (i < trimmed.Length && trimmed[i] == ' ') { i++; spaces++; }
-        return spaces >= 2 && i < trimmed.Length && char.IsUpper(trimmed[i]);
+        if (_emulator?.Buffer == null) return;
+        TuiArtifactCleaner.CleanClaudeArtifacts(_emulator, _emulator.Buffer);
     }
 
     /// <summary>
@@ -644,12 +624,16 @@ public class TerminalSessionViewModel : ToolWindowViewModel
             WorkingDirectory = dir;
     }
 
+    public void WriteTranscriptMarker(string label) => _transcriptLogger?.WriteMarker(label);
+
     public override void OnClose()
     {
         _writeChannel.Writer.TryComplete();
         _readCts?.Cancel();
         _conPty?.Dispose();
         _conPty = null;
+        _transcriptLogger?.Dispose();
+        _transcriptLogger = null;
         UnregisterInstance();
         base.OnClose();
     }

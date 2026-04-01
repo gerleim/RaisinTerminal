@@ -140,9 +140,16 @@ public class MainViewModel : ViewModelBase, IDisposable
         vm.IsActive = true;
     }
 
-    private void CreateNewSession()
+    private TerminalSessionViewModel AddSession(
+        string? workingDir = null, string? claudeSessionName = null, string? restoreCommand = null)
     {
         var session = new TerminalSessionViewModel();
+        if (workingDir != null)
+            session.WorkingDirectory = workingDir;
+        if (claudeSessionName != null)
+            session.ClaudeSessionName = claudeSessionName;
+        if (restoreCommand != null)
+            session.RestoreCommand = restoreCommand;
         session.CloseAction = () =>
         {
             Documents.Remove(session);
@@ -151,7 +158,10 @@ public class MainViewModel : ViewModelBase, IDisposable
         session.GenerateClaudeName = () => GenerateClaudeNameForSession(session);
         Documents.Add(session);
         session.IsActive = true;
+        return session;
     }
+
+    private void CreateNewSession() => AddSession();
 
     private void CreateNewClaudeSession()
     {
@@ -190,19 +200,8 @@ public class MainViewModel : ViewModelBase, IDisposable
         }
 
         var sessionName = GenerateUniqueClaudeName(projectName);
-        var newSession = new TerminalSessionViewModel();
-        newSession.ClaudeSessionName = sessionName;
-        if (projectHomePath != null)
-            newSession.WorkingDirectory = projectHomePath;
-        newSession.RestoreCommand = $"claude --name \"{sessionName}\"";
-        newSession.CloseAction = () =>
-        {
-            Documents.Remove(newSession);
-            newSession.OnClose();
-        };
-        newSession.GenerateClaudeName = () => GenerateClaudeNameForSession(newSession);
-        Documents.Add(newSession);
-        newSession.IsActive = true;
+        AddSession(workingDir: projectHomePath, claudeSessionName: sessionName,
+            restoreCommand: $"claude --name \"{sessionName}\"");
     }
 
     private string? GetProjectNameForDirectory(string? workingDir)
@@ -257,36 +256,14 @@ public class MainViewModel : ViewModelBase, IDisposable
         }
     }
 
-    public void CreateNewSessionInDirectory(string path)
-    {
-        var session = new TerminalSessionViewModel();
-        session.WorkingDirectory = path;
-        session.CloseAction = () =>
-        {
-            Documents.Remove(session);
-            session.OnClose();
-        };
-        session.GenerateClaudeName = () => GenerateClaudeNameForSession(session);
-        Documents.Add(session);
-        session.IsActive = true;
-    }
+    public void CreateNewSessionInDirectory(string path) => AddSession(workingDir: path);
 
     public void CreateNewClaudeSessionInDirectory(string path)
     {
         var projectName = GetProjectNameForDirectory(path);
         var sessionName = GenerateUniqueClaudeName(projectName);
-        var session = new TerminalSessionViewModel();
-        session.ClaudeSessionName = sessionName;
-        session.WorkingDirectory = path;
-        session.RestoreCommand = $"claude --name \"{sessionName}\"";
-        session.CloseAction = () =>
-        {
-            Documents.Remove(session);
-            session.OnClose();
-        };
-        session.GenerateClaudeName = () => GenerateClaudeNameForSession(session);
-        Documents.Add(session);
-        session.IsActive = true;
+        AddSession(workingDir: path, claudeSessionName: sessionName,
+            restoreCommand: $"claude --name \"{sessionName}\"");
     }
 
     private static void ShowOptions()

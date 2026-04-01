@@ -16,6 +16,7 @@ public class TerminalEmulator
 
     // Saved main screen buffer for alternate screen switching
     private CellData[,]? _savedScreen;
+    private bool[]? _savedWrapped;
     private int _savedCursorRow, _savedCursorCol;
     private int _savedScrollOffset;
 
@@ -27,6 +28,30 @@ public class TerminalEmulator
 
     // Last printed character for REP (CSI b)
     private char _lastPrintedChar;
+
+    // Suppresses scrollback during TUI redraws (sync output + ED 2)
+    private bool _syncRedrawSuppressScrollback;
+
+    // Standard 16-color ANSI palette (shared by HandleSgr and Color256)
+    private static readonly (byte R, byte G, byte B)[] Ansi16Colors =
+    [
+        (0, 0, 0),         // 0  Black
+        (205, 49, 49),     // 1  Red
+        (13, 188, 121),    // 2  Green
+        (229, 229, 16),    // 3  Yellow
+        (36, 114, 200),    // 4  Blue
+        (188, 63, 188),    // 5  Magenta
+        (17, 168, 205),    // 6  Cyan
+        (204, 204, 204),   // 7  White
+        (118, 118, 118),   // 8  Bright Black
+        (241, 76, 76),     // 9  Bright Red
+        (35, 209, 139),    // 10 Bright Green
+        (245, 245, 67),    // 11 Bright Yellow
+        (59, 142, 234),    // 12 Bright Blue
+        (214, 112, 214),   // 13 Bright Magenta
+        (41, 184, 219),    // 14 Bright Cyan
+        (229, 229, 229),   // 15 Bright White
+    ];
 
     // DECSC/DECRC saved cursor state
     private int _decSavedRow, _decSavedCol;
@@ -41,6 +66,22 @@ public class TerminalEmulator
     public bool AutoWrap { get; private set; } = true;
     public bool AlternateScreen { get; private set; }
     public bool BracketedPasteMode { get; private set; }
+
+    /// <summary>
+    /// DEC mode 2026: synchronized output. When true, the application is in the
+    /// middle of a screen update and the host should defer rendering until reset.
+    /// </summary>
+    public bool SynchronizedOutput { get; private set; }
+
+    /// <summary>
+    /// When true, logs all CSI/ESC operations to the event system for debugging.
+    /// </summary>
+    public bool AnsiLogging { get; set; }
+
+    /// <summary>
+    /// When set, printed characters and newlines are written to the transcript log.
+    /// </summary>
+    public SessionTranscriptLogger? TranscriptLogger { get; set; }
 
     /// <summary>Raised after a chunk of data has been processed and the buffer is dirty.</summary>
     public event Action? BufferChanged;
@@ -105,6 +146,12 @@ public class TerminalEmulator
         return new CellData(' ', _fgR, _fgG, _fgB, _bgR, _bgG, _bgB);
     }
 
+    private void LogAnsi(string message)
+    {
+        if (AnsiLogging)
+            _events?.Log(this, message, category: "ANSI");
+    }
+
     private void OnPrint(char c)
     {
         if (Buffer.CursorCol >= Buffer.Columns)
@@ -113,6 +160,7 @@ public class TerminalEmulator
             {
                 Buffer.CursorCol = 0;
                 Buffer.LineFeed();
+                Buffer.SetLineWrapped(Buffer.CursorRow, true);
             }
             else
             {
@@ -124,6 +172,7 @@ public class TerminalEmulator
             new CellData(c, _fgR, _fgG, _fgB, _bgR, _bgG, _bgB, _bold, _italic, _underline, _reverse, _dim, _strikethrough));
         Buffer.CursorCol++;
         _lastPrintedChar = c;
+        TranscriptLogger?.WriteText(c);
     }
 
     private void OnExecute(byte b)
@@ -133,7 +182,9 @@ public class TerminalEmulator
             case 0x0A: // LF
             case 0x0B: // VT
             case 0x0C: // FF
+                LogAnsi($"LF cursor=({Buffer.CursorRow},{Buffer.CursorCol}) scroll={Buffer.ScrollTop}-{Buffer.ScrollBottom}");
                 Buffer.LineFeed();
+                TranscriptLogger?.WriteTextNewline();
                 break;
             case 0x0D: // CR
                 Buffer.CarriageReturn();
@@ -171,12 +222,14 @@ public class TerminalEmulator
                 _reverse = _decSavedReverse; _dim = _decSavedDim; _strikethrough = _decSavedStrikethrough;
                 break;
             case 'M': // RI — Reverse Index (cursor up, scroll down if at top of scroll region)
+                LogAnsi($"RI cursor=({Buffer.CursorRow},{Buffer.CursorCol}) scroll={Buffer.ScrollTop}-{Buffer.ScrollBottom}");
                 if (Buffer.CursorRow == Buffer.ScrollTop)
                     Buffer.ScrollDownRegion(Buffer.ScrollTop, Buffer.ScrollBottom, MakeEraseCell());
                 else if (Buffer.CursorRow > 0)
                     Buffer.CursorRow--;
                 break;
             case 'D': // IND — Index (cursor down, scroll up if at bottom)
+                LogAnsi($"IND cursor=({Buffer.CursorRow},{Buffer.CursorCol}) scroll={Buffer.ScrollTop}-{Buffer.ScrollBottom}");
                 Buffer.LineFeed();
                 break;
             case 'E': // NEL — Next Line (CR + LF)
@@ -223,9 +276,13 @@ public class TerminalEmulator
                         if (set && !AlternateScreen)
                         {
                             _savedScreen = new CellData[Buffer.Rows, Buffer.Columns];
+                            _savedWrapped = new bool[Buffer.Rows];
                             for (int r = 0; r < Buffer.Rows; r++)
+                            {
+                                _savedWrapped[r] = Buffer.IsScreenLineWrapped(r);
                                 for (int c = 0; c < Buffer.Columns; c++)
                                     _savedScreen[r, c] = Buffer.GetCell(r, c);
+                            }
                             _savedScrollOffset = Buffer.ScrollOffset;
                             if (mode == 1047) Buffer.Clear();
                             Buffer.SuppressScrollback = true;
@@ -238,9 +295,14 @@ public class TerminalEmulator
                                 int rows = Math.Min(Buffer.Rows, _savedScreen.GetLength(0));
                                 int cols = Math.Min(Buffer.Columns, _savedScreen.GetLength(1));
                                 for (int r = 0; r < rows; r++)
+                                {
+                                    if (_savedWrapped != null && r < _savedWrapped.Length)
+                                        Buffer.SetLineWrapped(r, _savedWrapped[r]);
                                     for (int c = 0; c < cols; c++)
                                         Buffer.SetCell(r, c, _savedScreen[r, c]);
+                                }
                                 _savedScreen = null;
+                                _savedWrapped = null;
                             }
                             Buffer.ScrollOffset = _savedScrollOffset;
                             Buffer.SuppressScrollback = false;
@@ -256,9 +318,13 @@ public class TerminalEmulator
                             _savedCursorCol = Buffer.CursorCol;
                             _savedScrollOffset = Buffer.ScrollOffset;
                             _savedScreen = new CellData[Buffer.Rows, Buffer.Columns];
+                            _savedWrapped = new bool[Buffer.Rows];
                             for (int r = 0; r < Buffer.Rows; r++)
+                            {
+                                _savedWrapped[r] = Buffer.IsScreenLineWrapped(r);
                                 for (int c = 0; c < Buffer.Columns; c++)
                                     _savedScreen[r, c] = Buffer.GetCell(r, c);
+                            }
                             Buffer.Clear();
                             Buffer.SuppressScrollback = true;
                             AlternateScreen = true;
@@ -271,11 +337,16 @@ public class TerminalEmulator
                                 int rows = Math.Min(Buffer.Rows, _savedScreen.GetLength(0));
                                 int cols = Math.Min(Buffer.Columns, _savedScreen.GetLength(1));
                                 for (int r = 0; r < rows; r++)
+                                {
+                                    if (_savedWrapped != null && r < _savedWrapped.Length)
+                                        Buffer.SetLineWrapped(r, _savedWrapped[r]);
                                     for (int c = 0; c < cols; c++)
                                         Buffer.SetCell(r, c, _savedScreen[r, c]);
+                                }
                                 Buffer.CursorRow = Math.Min(_savedCursorRow, Buffer.Rows - 1);
                                 Buffer.CursorCol = Math.Min(_savedCursorCol, Buffer.Columns - 1);
                                 _savedScreen = null;
+                                _savedWrapped = null;
                             }
                             Buffer.ScrollOffset = _savedScrollOffset;
                             Buffer.SuppressScrollback = false;
@@ -285,6 +356,17 @@ public class TerminalEmulator
                     case 2004: // Bracketed Paste Mode
                         _events?.Log(this, $"DECSET 2004 BracketedPaste={set}", category: "Terminal");
                         BracketedPasteMode = set;
+                        break;
+                    case 2026: // Synchronized Output (DEC mode 2026)
+                        SynchronizedOutput = set;
+                        if (!set && _syncRedrawSuppressScrollback)
+                        {
+                            // End of a sync block that contained a full-screen clear:
+                            // restore normal scrollback behaviour.
+                            _syncRedrawSuppressScrollback = false;
+                            if (!AlternateScreen)
+                                Buffer.SuppressScrollback = false;
+                        }
                         break;
                 }
             }
@@ -327,19 +409,24 @@ public class TerminalEmulator
                 break;
             case 'H': // CUP - Cursor Position
             case 'f':
+                LogAnsi($"CUP ({Math.Clamp(Math.Max(1, p0) - 1, 0, Buffer.Rows - 1)},{Math.Clamp(Math.Max(1, p1) - 1, 0, Buffer.Columns - 1)})");
                 Buffer.CursorRow = Math.Clamp(Math.Max(1, p0) - 1, 0, Buffer.Rows - 1);
                 Buffer.CursorCol = Math.Clamp(Math.Max(1, p1) - 1, 0, Buffer.Columns - 1);
                 break;
             case 'J': // ED - Erase in Display
+                LogAnsi($"ED {p0} cursor=({Buffer.CursorRow},{Buffer.CursorCol}) scroll={Buffer.ScrollTop}-{Buffer.ScrollBottom}");
                 EraseInDisplay(p0);
                 break;
             case 'K': // EL - Erase in Line
+                LogAnsi($"EL {p0} cursor=({Buffer.CursorRow},{Buffer.CursorCol})");
                 EraseInLine(p0);
                 break;
             case 'L': // IL - Insert Lines
+                LogAnsi($"IL {Math.Max(1, p0)} cursor=({Buffer.CursorRow},{Buffer.CursorCol}) scroll={Buffer.ScrollTop}-{Buffer.ScrollBottom}");
                 InsertLines(Math.Max(1, p0));
                 break;
             case 'M': // DL - Delete Lines
+                LogAnsi($"DL {Math.Max(1, p0)} cursor=({Buffer.CursorRow},{Buffer.CursorCol}) scroll={Buffer.ScrollTop}-{Buffer.ScrollBottom}");
                 DeleteLines(Math.Max(1, p0));
                 break;
             case 'P': // DCH - Delete Characters
@@ -351,6 +438,7 @@ public class TerminalEmulator
             case 'S': // SU - Scroll Up
                 {
                     int n = Math.Max(1, p0);
+                    LogAnsi($"SU {n} scroll={Buffer.ScrollTop}-{Buffer.ScrollBottom}");
                     var fill = MakeEraseCell();
                     for (int i = 0; i < n; i++)
                         Buffer.ScrollUpRegion(Buffer.ScrollTop, Buffer.ScrollBottom, fill);
@@ -360,6 +448,7 @@ public class TerminalEmulator
                 if (privateMarker == 0)
                 {
                     int n = Math.Max(1, p0);
+                    LogAnsi($"SD {n} scroll={Buffer.ScrollTop}-{Buffer.ScrollBottom}");
                     var fill = MakeEraseCell();
                     for (int i = 0; i < n; i++)
                         Buffer.ScrollDownRegion(Buffer.ScrollTop, Buffer.ScrollBottom, fill);
@@ -388,6 +477,7 @@ public class TerminalEmulator
             case 'r': // DECSTBM - Set Scrolling Region
                 if (p0 == 0 && p1 == 0)
                 {
+                    LogAnsi($"DECSTBM reset to 0-{Buffer.Rows - 1}");
                     // Reset to full screen
                     Buffer.ScrollTop = 0;
                     Buffer.ScrollBottom = Buffer.Rows - 1;
@@ -398,6 +488,7 @@ public class TerminalEmulator
                     int bottom = (p1 == 0 ? Buffer.Rows : p1) - 1;
                     top = Math.Clamp(top, 0, Buffer.Rows - 1);
                     bottom = Math.Clamp(bottom, 0, Buffer.Rows - 1);
+                    LogAnsi($"DECSTBM {top}-{bottom}");
                     if (top < bottom)
                     {
                         Buffer.ScrollTop = top;
@@ -474,6 +565,16 @@ public class TerminalEmulator
                 EraseCells(0, 0, Buffer.CursorRow, Buffer.CursorCol, fill);
                 break;
             case 2: // entire screen
+                // When a full-screen clear arrives inside synchronized output,
+                // a TUI app is redrawing its frame. Suppress scrollback to
+                // prevent duplicate content from accumulating.
+                if (SynchronizedOutput && !AlternateScreen)
+                {
+                    _syncRedrawSuppressScrollback = true;
+                    Buffer.SuppressScrollback = true;
+                }
+                EraseCells(0, 0, Buffer.Rows - 1, Buffer.Columns - 1, fill);
+                break;
             case 3:
                 EraseCells(0, 0, Buffer.Rows - 1, Buffer.Columns - 1, fill);
                 break;
@@ -598,46 +699,23 @@ public class TerminalEmulator
                 case 29: _strikethrough = false; break;
 
                 // Standard foreground colors
-                case 30: (_fgR, _fgG, _fgB) = (0, 0, 0); break;
-                case 31: (_fgR, _fgG, _fgB) = (205, 49, 49); break;
-                case 32: (_fgR, _fgG, _fgB) = (13, 188, 121); break;
-                case 33: (_fgR, _fgG, _fgB) = (229, 229, 16); break;
-                case 34: (_fgR, _fgG, _fgB) = (36, 114, 200); break;
-                case 35: (_fgR, _fgG, _fgB) = (188, 63, 188); break;
-                case 36: (_fgR, _fgG, _fgB) = (17, 168, 205); break;
+                case 30: case 31: case 32: case 33: case 34: case 35: case 36:
+                    (_fgR, _fgG, _fgB) = Ansi16Colors[p - 30]; break;
                 case 37: (_fgR, _fgG, _fgB) = (CellData.DefaultFgR, CellData.DefaultFgG, CellData.DefaultFgB); break;
                 case 39: (_fgR, _fgG, _fgB) = (CellData.DefaultFgR, CellData.DefaultFgG, CellData.DefaultFgB); break; // default fg
 
                 // Bright foreground colors
-                case 90: (_fgR, _fgG, _fgB) = (118, 118, 118); break;
-                case 91: (_fgR, _fgG, _fgB) = (241, 76, 76); break;
-                case 92: (_fgR, _fgG, _fgB) = (35, 209, 139); break;
-                case 93: (_fgR, _fgG, _fgB) = (245, 245, 67); break;
-                case 94: (_fgR, _fgG, _fgB) = (59, 142, 234); break;
-                case 95: (_fgR, _fgG, _fgB) = (214, 112, 214); break;
-                case 96: (_fgR, _fgG, _fgB) = (41, 184, 219); break;
-                case 97: (_fgR, _fgG, _fgB) = (229, 229, 229); break;
+                case 90: case 91: case 92: case 93: case 94: case 95: case 96: case 97:
+                    (_fgR, _fgG, _fgB) = Ansi16Colors[p - 82]; break;
 
                 // Standard background colors
-                case 40: (_bgR, _bgG, _bgB) = (0, 0, 0); break;
-                case 41: (_bgR, _bgG, _bgB) = (205, 49, 49); break;
-                case 42: (_bgR, _bgG, _bgB) = (13, 188, 121); break;
-                case 43: (_bgR, _bgG, _bgB) = (229, 229, 16); break;
-                case 44: (_bgR, _bgG, _bgB) = (36, 114, 200); break;
-                case 45: (_bgR, _bgG, _bgB) = (188, 63, 188); break;
-                case 46: (_bgR, _bgG, _bgB) = (17, 168, 205); break;
-                case 47: (_bgR, _bgG, _bgB) = (204, 204, 204); break;
+                case 40: case 41: case 42: case 43: case 44: case 45: case 46: case 47:
+                    (_bgR, _bgG, _bgB) = Ansi16Colors[p - 40]; break;
                 case 49: (_bgR, _bgG, _bgB) = (CellData.DefaultBgR, CellData.DefaultBgG, CellData.DefaultBgB); break; // default bg
 
                 // Bright background colors
-                case 100: (_bgR, _bgG, _bgB) = (118, 118, 118); break;
-                case 101: (_bgR, _bgG, _bgB) = (241, 76, 76); break;
-                case 102: (_bgR, _bgG, _bgB) = (35, 209, 139); break;
-                case 103: (_bgR, _bgG, _bgB) = (245, 245, 67); break;
-                case 104: (_bgR, _bgG, _bgB) = (59, 142, 234); break;
-                case 105: (_bgR, _bgG, _bgB) = (214, 112, 214); break;
-                case 106: (_bgR, _bgG, _bgB) = (41, 184, 219); break;
-                case 107: (_bgR, _bgG, _bgB) = (229, 229, 229); break;
+                case 100: case 101: case 102: case 103: case 104: case 105: case 106: case 107:
+                    (_bgR, _bgG, _bgB) = Ansi16Colors[p - 92]; break;
 
                 // 256-color and true-color
                 case 38: // foreground
@@ -681,17 +759,7 @@ public class TerminalEmulator
     private static (byte R, byte G, byte B) Color256(int index)
     {
         if (index < 16)
-        {
-            // Standard 16 colors
-            return index switch
-            {
-                0 => (0, 0, 0), 1 => (205, 49, 49), 2 => (13, 188, 121), 3 => (229, 229, 16),
-                4 => (36, 114, 200), 5 => (188, 63, 188), 6 => (17, 168, 205), 7 => (204, 204, 204),
-                8 => (118, 118, 118), 9 => (241, 76, 76), 10 => (35, 209, 139), 11 => (245, 245, 67),
-                12 => (59, 142, 234), 13 => (214, 112, 214), 14 => (41, 184, 219), 15 => (229, 229, 229),
-                _ => (204, 204, 204)
-            };
-        }
+            return Ansi16Colors[index];
         if (index < 232)
         {
             // 6x6x6 color cube

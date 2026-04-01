@@ -252,4 +252,17 @@ public class TerminalEmulatorTests
         Assert.Equal('D', emu.Buffer.GetCell(0, 1).Character);
         Assert.Equal('E', emu.Buffer.GetCell(0, 2).Character);
     }
+
+    [Fact]
+    public void SynchronizedOutput_SetAndReset()
+    {
+        var emu = Create();
+        Assert.False(emu.SynchronizedOutput);
+
+        Feed(emu, "\x1b[?2026h"); // enable
+        Assert.True(emu.SynchronizedOutput);
+
+        Feed(emu, "\x1b[?2026l"); // disable
+        Assert.False(emu.SynchronizedOutput);
+    }
 }

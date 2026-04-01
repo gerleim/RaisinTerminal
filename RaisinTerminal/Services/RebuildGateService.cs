@@ -1,8 +1,9 @@
 using System.IO.Pipes;
 using System.Text;
-using Raisin.WPF.Base;
-using RaisinTerminal.ViewModels;
 using System.Collections.ObjectModel;
+using Raisin.WPF.Base;
+using RaisinTerminal.Core.Terminal;
+using RaisinTerminal.ViewModels;
 
 namespace RaisinTerminal.Services;
 

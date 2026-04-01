@@ -9,19 +9,12 @@ using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using Raisin.WPF.Base;
 using RaisinTerminal.Core.Helpers;
+using RaisinTerminal.Core.Terminal;
 using RaisinTerminal.Models;
 using RaisinTerminal.Services;
 using RaisinTerminal.Views;
 
 namespace RaisinTerminal.ViewModels;
-
-public enum TerminalStatus
-{
-    Idle,
-    Working,
-    WaitingForInput,
-    AgentsRunning
-}
 
 public class TerminalNodeViewModel : ViewModelBase
 {
@@ -158,6 +151,7 @@ public class ProjectsPanelViewModel : ViewModelBase
     public ICommand TogglePanelCommand { get; }
     public ICommand ProjectPropertiesCommand { get; }
     public ICommand CopyAttachmentPathCommand { get; }
+    public ICommand RenameAttachmentCommand { get; }
     public ICommand DeleteAttachmentCommand { get; }
     public ICommand OpenAttachmentCommand { get; }
     public ICommand OpenAttachmentsFolderCommand { get; }
@@ -186,6 +180,7 @@ public class ProjectsPanelViewModel : ViewModelBase
         TogglePanelCommand = new RelayCommand(() => IsPanelVisible = !IsPanelVisible);
         ProjectPropertiesCommand = new RelayCommand(o => ShowProjectProperties(o as ProjectNodeViewModel));
         CopyAttachmentPathCommand = new RelayCommand(o => CopyAttachmentPath(o as AttachmentItemViewModel));
+        RenameAttachmentCommand = new RelayCommand(o => RenameAttachment(o as AttachmentItemViewModel));
         DeleteAttachmentCommand = new RelayCommand(o => DeleteAttachment(o as AttachmentItemViewModel));
         OpenAttachmentCommand = new RelayCommand(o => OpenAttachment(o as AttachmentItemViewModel));
         OpenAttachmentsFolderCommand = new RelayCommand(o => OpenAttachmentsFolder(o as ProjectNodeViewModel));
@@ -283,6 +278,7 @@ public class ProjectsPanelViewModel : ViewModelBase
             {
                 UngroupedNode = new ProjectNodeViewModel(new Project { Name = "Ungrouped", HomePath = "" });
             }
+            _ungroupedNode!.Project.AlertOnWaitingForInput = SettingsService.Current.AlertOnWaitingForInput;
             SyncTerminalNodes(_ungroupedNode!, unmatched);
         }
         else
@@ -383,7 +379,11 @@ public class ProjectsPanelViewModel : ViewModelBase
             }
 
             existing.Title = session.Title;
-            existing.Status = DetermineStatus(session);
+            var newStatus = DetermineStatus(session);
+            if (newStatus == TerminalStatus.WaitingForInput && existing.Status != TerminalStatus.WaitingForInput
+                && projectNode.Project.AlertOnWaitingForInput)
+                AlertSoundPlayer.Play(SettingsService.Current.AlertSound);
+            existing.Status = newStatus;
         }
     }
 
@@ -412,13 +412,6 @@ public class ProjectsPanelViewModel : ViewModelBase
         }
     }
 
-    // Claude Code's thinking spinner cycles through these glyphs:
-    // · (U+00B7) ✢ (U+2722) ✳ (U+2733) ✶ (U+2736) ✻ (U+273B) ✽ (U+273D)
-    private static readonly HashSet<char> ClaudeSpinnerGlyphs =
-        ['\u00B7', '\u2722', '\u2733', '\u2736', '\u273B', '\u273D'];
-
-    private static readonly TimeSpan OutputIdleThreshold = TimeSpan.FromSeconds(2);
-
     // Debounce: track when each session was last seen with a running child process.
     // Toolhelp32 snapshots can transiently miss processes during tree transitions,
     // so we require ~4s of consecutive "not running" before transitioning to Idle.
@@ -437,7 +430,8 @@ public class ProjectsPanelViewModel : ViewModelBase
             if (_lastSeenRunning.TryGetValue(sessionId, out var lastRun)
                 && DateTime.UtcNow - lastRun < TimeSpan.FromSeconds(4))
             {
-                var screenStatus = ClassifyClaudeScreenState(session);
+                var screenStatus = ClaudeScreenStateClassifier.Classify(
+                    row => session.ReadScreenLine(row), session.CursorRow, session.ScreenRows);
                 return screenStatus is TerminalStatus.Idle or TerminalStatus.AgentsRunning
                     ? TerminalStatus.Working : screenStatus;
             }
@@ -451,211 +445,12 @@ public class ProjectsPanelViewModel : ViewModelBase
         // Claude Code: always scan screen content — Claude's TUI produces frequent
         // status bar updates that would keep LastOutputTime permanently fresh
         if (string.Equals(childName, "claude", StringComparison.OrdinalIgnoreCase))
-            return ClassifyClaudeScreenState(session);
+            return ClaudeScreenStateClassifier.Classify(
+                row => session.ReadScreenLine(row), session.CursorRow, session.ScreenRows);
 
         if (session.IsInAlternateScreen)
             return TerminalStatus.WaitingForInput;
         return TerminalStatus.Working;
-    }
-
-    /// <summary>
-    /// Scans the terminal screen to classify Claude Code's state:
-    /// - Idle: main input prompt visible (line starts with ">")
-    /// - WaitingForInput: positively detected approval/input prompt
-    /// - Working: default when output has settled but no prompt detected
-    /// </summary>
-    private static TerminalStatus ClassifyClaudeScreenState(TerminalSessionViewModel session)
-        => ClassifyClaudeScreenState(row => session.ReadScreenLine(row), session.CursorRow, session.ScreenRows);
-
-    /// <summary>
-    /// Testable core: scans screen lines to classify Claude Code's state.
-    /// </summary>
-    internal static TerminalStatus ClassifyClaudeScreenState(Func<int, string> getLineText, int cursorRow, int screenRows)
-    {
-        if (cursorRow < 0 || screenRows <= 0) return TerminalStatus.Working;
-
-        // Claude's Ink TUI may place the cursor on the status bar at the screen
-        // bottom, far from the actual "❯" prompt. Scan all visible rows, but use
-        // targeted checks to avoid false positives from normal output text.
-        TerminalStatus? result = null;
-        bool foundIdlePrompt = false;
-        bool foundWorkingIndicator = false;
-        bool foundCompletionSummary = false;
-        int completionSummaryRow = -1;
-        int idlePromptRow = -1;
-        bool foundNumberedOptions = false;
-        bool foundLocalAgents = false;
-        int foundOption1Row = -1;
-        int foundOption2Row = -1;
-        for (int row = 0; row < screenRows; row++)
-        {
-            var line = getLineText(row);
-            var trimmed = line.TrimStart();
-
-            // Claude's idle prompt uses "❯" (U+276F). Safe to scan all rows
-            // since quoted user messages use ">" (ASCII), not "❯".
-            if (trimmed.StartsWith("\u276F"))
-            {
-                foundIdlePrompt = true;
-                idlePromptRow = row;
-            }
-
-            // Also check ">" but only on short lines to avoid matching quoted text
-            if (trimmed.StartsWith(">") && trimmed.Length <= 3)
-            {
-                foundIdlePrompt = true;
-                idlePromptRow = row;
-            }
-
-            // Working indicator: Claude Code's spinner cycles through these
-            // star-like glyphs before the status text (e.g. "✳ Ionizing...")
-            // Exclude the completion summary (e.g. "✻ Brewed for 5m 43s") which
-            // reuses the same glyphs but shows a duration — the verb varies randomly.
-            // The working spinner always contains '…' (ellipsis) e.g. "✻ Sketching… (1m 44s · ↓ 269 tokens)"
-            // while the completion summary does not (e.g. "✻ Brewed for 5m 43s.").
-            if (trimmed.Length > 0 && ClaudeSpinnerGlyphs.Contains(trimmed[0]))
-            {
-                // Check both Unicode ellipsis '…' (U+2026) and ASCII "..." — Claude Code
-                // may emit either depending on the Ink renderer path.
-                if (trimmed.Contains('…') || trimmed.Contains("...") || !HasDurationPattern(trimmed))
-                    foundWorkingIndicator = true;
-                else
-                {
-                    foundCompletionSummary = true; // e.g. "✻ Churned for 45s" — Claude finished
-                    completionSummaryRow = row;
-                }
-            }
-
-            // Broader detection: Claude's working status bar shows
-            // "glyph Verb… (duration · ↓ N tokens · ...)" — detect this even
-            // when the leading glyph isn't in our known spinner set (Claude Code
-            // may add new spinner characters). The ↓ + ellipsis combo is distinctive.
-            if (!foundWorkingIndicator && trimmed.Length > 2
-                && !char.IsLetterOrDigit(trimmed[0])
-                && trimmed[1] == ' '
-                && (trimmed.Contains('…') || trimmed.Contains("..."))
-                && trimmed.Contains('\u2193')) // ↓
-            {
-                foundWorkingIndicator = true;
-            }
-
-            // Track numbered options (e.g. "1. Paste from clipboard", "2. Open a new tab")
-            // These indicate Claude asked a question with choices.
-            // Record the row so we can later check if they're near the idle prompt
-            // (Claude places numbered options just above the ❯ prompt).
-            // The selected option may have a "> " prefix from Ink's selection cursor.
-            var optLine = trimmed;
-            if (optLine.StartsWith("> "))
-                optLine = optLine.Substring(2);
-            if (optLine.Length > 2 && optLine[0] == '1' && optLine[1] == '.')
-                foundOption1Row = row;
-            if (optLine.Length > 2 && optLine[0] == '2' && optLine[1] == '.')
-                foundOption2Row = row;
-
-            // Tool approval / yes-no prompts (scan near cursor only)
-            if (Math.Abs(row - cursorRow) <= 5)
-            {
-                if (trimmed.Contains("Yes") && trimmed.Contains("No"))
-                    result = TerminalStatus.WaitingForInput;
-
-                if (trimmed.Contains("Enter to select"))
-                    result = TerminalStatus.WaitingForInput;
-
-                // "Esc to cancel" footer appears on tool approval and interactive prompts.
-                // Also check near the cursor — when the terminal has more rows than content,
-                // the footer won't be at the very bottom of the screen buffer.
-                if (trimmed.Contains("Esc to cancel"))
-                    result = TerminalStatus.WaitingForInput;
-            }
-
-            // "Esc to cancel" footer near the bottom of the screen.
-            if (row >= screenRows - 5 && trimmed.Contains("Esc to cancel"))
-                result = TerminalStatus.WaitingForInput;
-
-            // "ctrl-g to edit" footer appears in plan mode selection UI
-            if (row >= screenRows - 5 && trimmed.Contains("ctrl-g to edit"))
-                result = TerminalStatus.WaitingForInput;
-
-            // Background agents: Claude's status bar shows "N local agent(s)"
-            // when agents are running — tracked separately so the main session
-            // can show a distinct cyan indicator instead of green Working.
-            if (row >= screenRows - 5 && trimmed.Contains("local agent"))
-                foundLocalAgents = true;
-        }
-
-        // Only treat numbered options as a question if both "1." and "2." appear
-        // near the idle prompt or cursor (within 10 rows). This prevents false positives
-        // from numbered lists in regular Claude output.
-        // When no idle prompt is found (e.g. plan mode selection UI), fall back to
-        // cursor row as anchor.
-        // Suppress numbered options that appear ABOVE a completion summary (they're
-        // old response text). But options BELOW the summary are from a new interaction
-        // (e.g. tool approval after the previous task finished).
-        bool completionSuppressesOptions = foundCompletionSummary
-            && completionSummaryRow > foundOption1Row;
-        if (foundOption1Row >= 0 && foundOption2Row >= 0 && !completionSuppressesOptions)
-        {
-            if (idlePromptRow >= 0)
-            {
-                // Options must be within 10 rows above the idle prompt
-                foundNumberedOptions = idlePromptRow - foundOption1Row is >= 0 and <= 10
-                    && idlePromptRow - foundOption2Row is >= 0 and <= 10;
-            }
-            else
-            {
-                // No idle prompt (Ink TUI screens like plan mode) — just verify
-                // the options are close to each other (not scattered in output)
-                foundNumberedOptions = Math.Abs(foundOption1Row - foundOption2Row) <= 5;
-            }
-        }
-
-        // WaitingForInput takes priority, then idle prompt with numbered
-        // options (Claude asked a question), then plain idle prompt, then Working
-        if (result != TerminalStatus.WaitingForInput && foundIdlePrompt && !foundWorkingIndicator)
-        {
-            if (foundNumberedOptions)
-                result = TerminalStatus.WaitingForInput;
-            else if (foundLocalAgents)
-                result = TerminalStatus.AgentsRunning;
-            else
-                result = TerminalStatus.Idle;
-        }
-
-        // Numbered options near cursor without idle prompt (e.g. plan mode selection UI)
-        if (result == null && foundNumberedOptions && !foundWorkingIndicator)
-            result = TerminalStatus.WaitingForInput;
-
-        // Completion summary + agents but no idle prompt visible
-        if (result == null && foundLocalAgents && !foundWorkingIndicator && foundCompletionSummary)
-            result = TerminalStatus.AgentsRunning;
-
-        if (result == null)
-            result = TerminalStatus.Working;
-
-        return result.Value;
-    }
-
-    /// <summary>
-    /// Returns true if the line contains a duration like "5m 43s", "30s", "1h 2m", etc.
-    /// Used to distinguish Claude's completion summary from the working spinner.
-    /// </summary>
-    private static bool HasDurationPattern(string line)
-    {
-        // Look for digit(s) followed by 's', 'm', or 'h' (time units)
-        for (int i = 0; i < line.Length - 1; i++)
-        {
-            if (char.IsDigit(line[i]))
-            {
-                char next = line[i + 1];
-                if (next is 's' or 'm' or 'h')
-                {
-                    // Ensure it's not part of a longer word (check char after unit)
-                    if (i + 2 >= line.Length || line[i + 2] == ' ' || char.IsDigit(line[i + 2]))
-                        return true;
-                }
-            }
-        }
-        return false;
     }
 
     private static bool IsSubPath(string path, string basePath) =>
@@ -780,7 +575,8 @@ public class ProjectsPanelViewModel : ViewModelBase
             {
                 Name = Path.GetFileName(folderPath),
                 HomePath = folderPath,
-                IconPath = FindBestIcon(folderPath)
+                IconPath = FindBestIcon(folderPath),
+                AlertOnWaitingForInput = SettingsService.Current.AlertOnWaitingForInput
             };
             _projectList.Add(project);
             SaveState();
@@ -835,6 +631,32 @@ public class ProjectsPanelViewModel : ViewModelBase
     {
         if (item == null) return;
         Clipboard.SetText(item.FilePath);
+    }
+
+    private void RenameAttachment(AttachmentItemViewModel? item)
+    {
+        if (item == null || !File.Exists(item.FilePath)) return;
+
+        var dialog = new RenameDialog(item.FilePath)
+        {
+            Owner = Application.Current.MainWindow
+        };
+
+        if (dialog.ShowDialog() != true) return;
+
+        var newPath = AttachmentService.RenameAttachment(item.FilePath, dialog.NewFileName);
+        if (newPath == null) return;
+
+        // Replace the item in the owning project's attachment list
+        foreach (var project in Projects)
+        {
+            var idx = project.Attachments.IndexOf(item);
+            if (idx >= 0)
+            {
+                project.Attachments[idx] = new AttachmentItemViewModel(newPath);
+                break;
+            }
+        }
     }
 
     private void DeleteAttachment(AttachmentItemViewModel? item)

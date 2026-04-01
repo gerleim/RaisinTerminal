@@ -19,6 +19,7 @@ public partial class ProjectPropertiesWindow : Window
         IdBox.Text = project.Id;
         NameBox.Text = project.Name;
         HomePathBox.Text = project.HomePath;
+        AlertOnWaitingBox.IsChecked = project.AlertOnWaitingForInput;
         SetIconPath(project.IconPath);
     }
 
@@ -100,6 +101,7 @@ public partial class ProjectPropertiesWindow : Window
         Project.Name = NameBox.Text.Trim();
         Project.HomePath = HomePathBox.Text.Trim();
         Project.IconPath = _iconPath;
+        Project.AlertOnWaitingForInput = AlertOnWaitingBox.IsChecked == true;
         DialogResult = true;
         Close();
     }

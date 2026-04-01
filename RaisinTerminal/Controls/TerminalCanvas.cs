@@ -41,6 +41,9 @@ public class TerminalCanvas : FrameworkElement
     // Brush cache: avoids per-cell allocations. Frozen brushes persist across frames.
     private readonly Dictionary<(byte, byte, byte), Brush> _brushCache = new();
 
+    // Pen cache: avoids per-cell allocations for underline/strikethrough.
+    private readonly Dictionary<(byte, byte, byte), Pen> _penCache = new();
+
     public int Columns => _cellWidth > 0 ? (int)(ActualWidth / _cellWidth) : 0;
     public int Rows => _cellHeight > 0 ? (int)(ActualHeight / _cellHeight) : 0;
 
@@ -57,17 +60,31 @@ public class TerminalCanvas : FrameworkElement
     public (long Row, int Col)? SelectionStart { get; set; }
     public (long Row, int Col)? SelectionEnd { get; set; }
 
+    // Search highlights (absolute row coordinates, like selection)
+    public List<SearchMatch>? SearchMatches { get; set; }
+    public SearchMatch? CurrentSearchMatch { get; set; }
+
     private static readonly Brush DefaultBg = new SolidColorBrush(Color.FromRgb(CellData.DefaultBgR, CellData.DefaultBgG, CellData.DefaultBgB));
     private static readonly Brush CursorBrush = new SolidColorBrush(Color.FromRgb(CellData.DefaultFgR, CellData.DefaultFgG, CellData.DefaultFgB));
+    private static readonly Brush CursorBlockBrush = new SolidColorBrush(Color.FromArgb(0xA0, CellData.DefaultFgR, CellData.DefaultFgG, CellData.DefaultFgB));
     private static readonly Brush SelectionBrush;
+    private static readonly Brush SearchHighlightBrush;
+    private static readonly Brush CurrentSearchHighlightBrush;
 
     static TerminalCanvas()
     {
         DefaultBg.Freeze();
         CursorBrush.Freeze();
+        CursorBlockBrush.Freeze();
         var sel = new SolidColorBrush(Color.FromArgb(0x60, 0x26, 0x4F, 0x78));
         sel.Freeze();
         SelectionBrush = sel;
+        var searchHl = new SolidColorBrush(Color.FromArgb(0x80, 0xAA, 0x88, 0x00));
+        searchHl.Freeze();
+        SearchHighlightBrush = searchHl;
+        var currentSearchHl = new SolidColorBrush(Color.FromArgb(0xB0, 0xFF, 0xAA, 0x00));
+        currentSearchHl.Freeze();
+        CurrentSearchHighlightBrush = currentSearchHl;
     }
 
     public TerminalCanvas()
@@ -99,6 +116,7 @@ public class TerminalCanvas : FrameworkElement
         // Cap caches to prevent unbounded growth
         if (_glyphCache.Count > 10_000) _glyphCache.Clear();
         if (_brushCache.Count > 10_000) _brushCache.Clear();
+        if (_penCache.Count > 10_000) _penCache.Clear();
 
         // Background
         dc.DrawRectangle(DefaultBg, null, new Rect(0, 0, ActualWidth, ActualHeight));
@@ -213,6 +231,24 @@ public class TerminalCanvas : FrameworkElement
                     dc.DrawRectangle(SelectionBrush, null, new Rect(x, y, _cellWidth, rowH));
                 }
 
+                // Draw search highlights
+                if (SearchMatches != null)
+                {
+                    foreach (var match in SearchMatches)
+                    {
+                        if (match.AbsoluteRow != absRow) continue;
+                        if (col >= match.StartCol && col < match.StartCol + match.Length)
+                        {
+                            bool isCurrent = CurrentSearchMatch.HasValue &&
+                                             CurrentSearchMatch.Value.AbsoluteRow == match.AbsoluteRow &&
+                                             CurrentSearchMatch.Value.StartCol == match.StartCol;
+                            dc.DrawRectangle(isCurrent ? CurrentSearchHighlightBrush : SearchHighlightBrush,
+                                null, new Rect(x, y, _cellWidth, rowH));
+                            break; // only one match can cover this cell
+                        }
+                    }
+                }
+
                 // Draw character
                 if (cell.Character != ' ' && cell.Character != '\0')
                 {
@@ -246,14 +282,16 @@ public class TerminalCanvas : FrameworkElement
 
                     if (cell.Underline)
                     {
-                        dc.DrawLine(new Pen(fgBrush, 1),
+                        var pen = GetCachedPen(_penCache, effFgR, effFgG, effFgB);
+                        dc.DrawLine(pen,
                             new Point(x, y + rowH - 1),
                             new Point(x + _cellWidth, y + rowH - 1));
                     }
 
                     if (cell.Strikethrough)
                     {
-                        dc.DrawLine(new Pen(fgBrush, 1),
+                        var pen = GetCachedPen(_penCache, effFgR, effFgG, effFgB);
+                        dc.DrawLine(pen,
                             new Point(x, y + rowH / 2),
                             new Point(x + _cellWidth, y + rowH / 2));
                     }
@@ -273,10 +311,7 @@ public class TerminalCanvas : FrameworkElement
             double cy = rowYPositions[displayCursorRow];
             double cursorH = rowYPositions[displayCursorRow + 1] - cy;
 
-            // Draw a block cursor with semi-transparent overlay
-            var cursorBlock = new SolidColorBrush(Color.FromArgb(0xA0, CellData.DefaultFgR, CellData.DefaultFgG, CellData.DefaultFgB));
-            cursorBlock.Freeze();
-            dc.DrawRectangle(cursorBlock, null, new Rect(cx, cy, _cellWidth, cursorH));
+            dc.DrawRectangle(CursorBlockBrush, null, new Rect(cx, cy, _cellWidth, cursorH));
         }
     }
 
@@ -511,6 +546,20 @@ public class TerminalCanvas : FrameworkElement
         return brush;
     }
 
+    private static Pen GetCachedPen(Dictionary<(byte, byte, byte), Pen> cache, byte r, byte g, byte b)
+    {
+        var key = (r, g, b);
+        if (!cache.TryGetValue(key, out var pen))
+        {
+            var brush = new SolidColorBrush(Color.FromRgb(r, g, b));
+            brush.Freeze();
+            pen = new Pen(brush, 1);
+            pen.Freeze();
+            cache[key] = pen;
+        }
+        return pen;
+    }
+
     /// <summary>
     /// Converts a pixel position to absolute (row, col).
     /// Row is an absolute row index that tracks content across scrolling.
@@ -539,12 +588,16 @@ public class TerminalCanvas : FrameworkElement
             displayRow = (int)(position.Y / _cellHeight);
         }
 
-        // Convert from display-space to buffer-space, then to absolute
-        int bufferRow = Math.Clamp(displayRow - _extraRows, 0, Math.Max(0, Rows - 1));
+        // Clamp displayRow to the range of rows from the last render
+        int totalDisplayRows = (_rowYPositions?.Length ?? 1) - 1;
+        displayRow = Math.Clamp(displayRow, 0, Math.Max(0, totalDisplayRows - 1));
+
+        // Convert from display-space to absolute — must match OnRender's
+        // absRowBase formula: TotalLinesScrolled - ScrollOffset - extraRows
         var buffer = Emulator?.Buffer;
         long absRow = buffer != null
-            ? buffer.TotalLinesScrolled - buffer.ScrollOffset + bufferRow
-            : bufferRow;
+            ? buffer.TotalLinesScrolled - buffer.ScrollOffset - _extraRows + displayRow
+            : displayRow;
         return (absRow, col);
     }
 
@@ -586,12 +639,29 @@ public class TerminalCanvas : FrameworkElement
                 }
                 sb.Append(cell.Character == '\0' ? ' ' : cell.Character);
             }
-            // Trim trailing spaces on each line except the last
+            // Add line break between rows, but not for soft-wrapped continuations
             if (r < er)
             {
-                while (sb.Length > 0 && sb[sb.Length - 1] == ' ')
-                    sb.Length--;
-                sb.AppendLine();
+                // Check if the next row is a soft-wrapped continuation
+                long nextR = r + 1;
+                int nextScreenRow = (int)(nextR - buffer.TotalLinesScrolled);
+                bool nextIsWrapped;
+                if (nextScreenRow >= 0 && nextScreenRow < buffer.Rows)
+                    nextIsWrapped = buffer.IsScreenLineWrapped(nextScreenRow);
+                else
+                {
+                    int nextSbIndex = buffer.ScrollbackCount + nextScreenRow;
+                    nextIsWrapped = nextSbIndex >= 0 && nextSbIndex < buffer.ScrollbackCount
+                        && buffer.IsScrollbackLineWrapped(nextSbIndex);
+                }
+
+                if (!nextIsWrapped)
+                {
+                    // Hard line break: trim trailing spaces and add newline
+                    while (sb.Length > 0 && sb[sb.Length - 1] == ' ')
+                        sb.Length--;
+                    sb.AppendLine();
+                }
             }
         }
         return sb.ToString().TrimEnd();

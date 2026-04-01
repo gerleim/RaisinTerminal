@@ -83,7 +83,9 @@
             </Grid.ColumnDefinitions>
 
             <!-- Projects Panel -->
-            <views:ProjectsPanelView Grid.Column="0" Width="240" MinWidth="150" MaxWidth="500"
+            <views:ProjectsPanelView Grid.Column="0"
+                                      Width="{Binding PanelWidth, Mode=TwoWay}"
+                                      MinWidth="150"
                                       DataContext="{Binding ProjectsPanel}"
                                       Visibility="{Binding IsPanelVisible, Converter={StaticResource BoolToVisConverter}}"/>
 

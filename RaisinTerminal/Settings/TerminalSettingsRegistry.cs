@@ -1,10 +1,11 @@
 using Raisin.WPF.Base.Settings;
+using RaisinTerminal.Services;
 
 namespace RaisinTerminal.Settings;
 
 public static class TerminalSettingsRegistry
 {
-    public static readonly string[] CategoryOrder = ["Display", "Attachments"];
+    public static readonly string[] CategoryOrder = ["Display", "Alerts", "Attachments", "Debug"];
 
     public static readonly List<SettingDefinition> All =
     [
@@ -17,6 +18,27 @@ public static class TerminalSettingsRegistry
             PropertyName = "CompressEmptyLines",
             EditorType = SettingEditorType.Bool,
             Order = 0,
+        },
+        new()
+        {
+            Key = "alerts.waiting-for-input",
+            DisplayName = "Alert on waiting for input",
+            Description = "Play a sound when a terminal session starts waiting for user input. This is the default for terminals not assigned to a project and for newly created projects.",
+            Category = "Alerts",
+            PropertyName = "AlertOnWaitingForInput",
+            EditorType = SettingEditorType.Bool,
+            Order = 0,
+        },
+        new()
+        {
+            Key = "alerts.sound",
+            DisplayName = "Alert sound",
+            Description = "Sound to play when a terminal starts waiting for input.",
+            Category = "Alerts",
+            PropertyName = "AlertSound",
+            EditorType = SettingEditorType.Choice,
+            Choices = AlertSoundPlayer.GetAvailableChoices(),
+            Order = 1,
         },
         new()
         {
@@ -39,6 +61,16 @@ public static class TerminalSettingsRegistry
             Order = 1,
             MinInt = 1,
             MaxInt = 365,
+        },
+        new()
+        {
+            Key = "debug.ansi-logging",
+            DisplayName = "ANSI sequence logging",
+            Description = "Log terminal ANSI operations (cursor moves, erases, scrolls, line ops) to the log file for debugging rendering issues.",
+            Category = "Debug",
+            PropertyName = "AnsiLogging",
+            EditorType = SettingEditorType.Bool,
+            Order = 0,
         },
     ];
 }

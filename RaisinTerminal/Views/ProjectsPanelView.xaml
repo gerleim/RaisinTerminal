@@ -2,6 +2,7 @@
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:vm="clr-namespace:RaisinTerminal.ViewModels"
+             xmlns:core="clr-namespace:RaisinTerminal.Core.Terminal;assembly=RaisinTerminal.Core"
              Background="#1E1E1E">
     <UserControl.Resources>
         <!-- Status dot colors -->
@@ -61,13 +62,13 @@
                             <Grid.Style>
                                 <Style TargetType="Grid">
                                     <Style.Triggers>
-                                        <DataTrigger Binding="{Binding Status}" Value="{x:Static vm:TerminalStatus.Working}">
+                                        <DataTrigger Binding="{Binding Status}" Value="{x:Static core:TerminalStatus.Working}">
                                             <Setter Property="Visibility" Value="Collapsed"/>
                                         </DataTrigger>
-                                        <DataTrigger Binding="{Binding Status}" Value="{x:Static vm:TerminalStatus.WaitingForInput}">
+                                        <DataTrigger Binding="{Binding Status}" Value="{x:Static core:TerminalStatus.WaitingForInput}">
                                             <Setter Property="Visibility" Value="Collapsed"/>
                                         </DataTrigger>
-                                        <DataTrigger Binding="{Binding Status}" Value="{x:Static vm:TerminalStatus.AgentsRunning}">
+                                        <DataTrigger Binding="{Binding Status}" Value="{x:Static core:TerminalStatus.AgentsRunning}">
                                             <Setter Property="Visibility" Value="Collapsed"/>
                                         </DataTrigger>
                                     </Style.Triggers>
@@ -134,7 +135,7 @@
             </Border>
             <!-- Animations at DataTemplate level — avoids WPF freezing Freezables inside Style setters -->
             <DataTemplate.Triggers>
-                <DataTrigger Binding="{Binding Status}" Value="{x:Static vm:TerminalStatus.Working}">
+                <DataTrigger Binding="{Binding Status}" Value="{x:Static core:TerminalStatus.Working}">
                     <Setter TargetName="WorkingGrid" Property="Visibility" Value="Visible"/>
                     <DataTrigger.EnterActions>
                         <BeginStoryboard x:Name="SpinStoryboard">
@@ -150,7 +151,7 @@
                         <StopStoryboard BeginStoryboardName="SpinStoryboard"/>
                     </DataTrigger.ExitActions>
                 </DataTrigger>
-                <DataTrigger Binding="{Binding Status}" Value="{x:Static vm:TerminalStatus.WaitingForInput}">
+                <DataTrigger Binding="{Binding Status}" Value="{x:Static core:TerminalStatus.WaitingForInput}">
                     <Setter TargetName="WaitingGrid" Property="Visibility" Value="Visible"/>
                     <DataTrigger.EnterActions>
                         <BeginStoryboard x:Name="PulseStoryboard">
@@ -170,7 +171,7 @@
                         <StopStoryboard BeginStoryboardName="PulseStoryboard"/>
                     </DataTrigger.ExitActions>
                 </DataTrigger>
-                <DataTrigger Binding="{Binding Status}" Value="{x:Static vm:TerminalStatus.AgentsRunning}">
+                <DataTrigger Binding="{Binding Status}" Value="{x:Static core:TerminalStatus.AgentsRunning}">
                     <Setter TargetName="AgentsRunningGrid" Property="Visibility" Value="Visible"/>
                     <DataTrigger.EnterActions>
                         <BeginStoryboard x:Name="AgentSpinStoryboard">
@@ -199,6 +200,9 @@
                                   CommandParameter="{Binding}"/>
                         <MenuItem Header="Open"
                                   Command="{Binding DataContext.OpenAttachmentCommand, Source={x:Reference ProjectsTree}}"
+                                  CommandParameter="{Binding}"/>
+                        <MenuItem Header="Rename"
+                                  Command="{Binding DataContext.RenameAttachmentCommand, Source={x:Reference ProjectsTree}}"
                                   CommandParameter="{Binding}"/>
                         <Separator/>
                         <MenuItem Header="Delete"

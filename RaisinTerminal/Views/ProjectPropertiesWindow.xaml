@@ -52,6 +52,10 @@
             </StackPanel>
         </DockPanel>
 
+        <!-- Alert setting -->
+        <CheckBox x:Name="AlertOnWaitingBox" Content="Alert on waiting for input"
+                  Foreground="#E0E0E0" FontSize="12" Margin="0,0,0,20"/>
+
         <!-- Buttons -->
         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
             <Button Content="OK" Width="80" IsDefault="True" Click="OnOk" Margin="0,0,8,0"/>

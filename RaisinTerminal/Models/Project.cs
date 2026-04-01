@@ -6,4 +6,5 @@ public class Project
     public string Name { get; set; } = "";
     public string HomePath { get; set; } = "";
     public string? IconPath { get; set; }
+    public bool AlertOnWaitingForInput { get; set; } = true;
 }

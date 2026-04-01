@@ -24,8 +24,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Raisin.AvalonDock" Version="4.72.4" />
-    <PackageReference Include="Raisin.AvalonDock.Themes.VS2013" Version="4.72.4" />
+    <PackageReference Include="Raisin.AvalonDock" Version="4.72.5" />
+    <PackageReference Include="Raisin.AvalonDock.Themes.VS2013" Version="4.72.5" />
   </ItemGroup>
   <ItemGroup Condition="'$(UseProjectReferences)' != 'false'">
     <ProjectReference Include="..\..\LibrariesRaisin\Raisin.EventSystem\Raisin.EventSystem.csproj" />

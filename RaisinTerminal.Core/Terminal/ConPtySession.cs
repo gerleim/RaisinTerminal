@@ -68,33 +68,11 @@ public sealed class ConPtySession : IDisposable
             if (handle == IntPtr.Zero) return null;
             try
             {
-                // Step 1: Get PEB address
-                var pbi = new PROCESS_BASIC_INFORMATION();
-                int status = NtQueryInformationProcess(handle, 0, ref pbi, Marshal.SizeOf(pbi), out _);
-                if (status != 0) return null;
+                var procParamsPtr = ReadProcParamsPtr(handle);
+                if (procParamsPtr == IntPtr.Zero) return null;
 
-                // Step 2: Read ProcessParameters pointer from PEB (offset 0x20 on x64)
-                IntPtr procParamsPtr;
-                if (!ReadProcessMemory(handle, pbi.PebBaseAddress + 0x20, out procParamsPtr, (IntPtr)IntPtr.Size, out _))
-                    return null;
-
-                // Step 3: Read CurrentDirectory.Buffer (UNICODE_STRING at offset 0x38, Buffer pointer at 0x38+8=0x40 on x64)
-                short dirLength;
-                if (!ReadProcessMemory(handle, procParamsPtr + 0x38, out dirLength, (IntPtr)2, out _))
-                    return null;
-
-                IntPtr dirBufferPtr;
-                if (!ReadProcessMemory(handle, procParamsPtr + 0x40, out dirBufferPtr, (IntPtr)IntPtr.Size, out _))
-                    return null;
-
-                if (dirLength <= 0 || dirLength > 1024) return null;
-
-                var buffer = new byte[dirLength];
-                if (!ReadProcessMemory(handle, dirBufferPtr, buffer, (IntPtr)buffer.Length, out _))
-                    return null;
-
-                var dir = System.Text.Encoding.Unicode.GetString(buffer).TrimEnd('\\');
-                return dir;
+                // CurrentDirectory UNICODE_STRING at offset 0x38 in RTL_USER_PROCESS_PARAMETERS (x64)
+                return ReadPebUnicodeString(handle, procParamsPtr, 0x38, 1024)?.TrimEnd('\\');
             }
             finally
             {
@@ -178,36 +156,54 @@ public sealed class ConPtySession : IDisposable
         if (handle == IntPtr.Zero) return null;
         try
         {
-            var pbi = new PROCESS_BASIC_INFORMATION();
-            if (NtQueryInformationProcess(handle, 0, ref pbi, Marshal.SizeOf(pbi), out _) != 0)
-                return null;
+            var procParamsPtr = ReadProcParamsPtr(handle);
+            if (procParamsPtr == IntPtr.Zero) return null;
 
-            IntPtr procParamsPtr;
-            if (!ReadProcessMemory(handle, pbi.PebBaseAddress + 0x20, out procParamsPtr, (IntPtr)IntPtr.Size, out _))
-                return null;
-
-            // CommandLine UNICODE_STRING is at offset 0x70 in RTL_USER_PROCESS_PARAMETERS (x64)
-            short cmdLength;
-            if (!ReadProcessMemory(handle, procParamsPtr + 0x70, out cmdLength, (IntPtr)2, out _))
-                return null;
-
-            IntPtr cmdBufferPtr;
-            if (!ReadProcessMemory(handle, procParamsPtr + 0x78, out cmdBufferPtr, (IntPtr)IntPtr.Size, out _))
-                return null;
-
-            if (cmdLength <= 0 || cmdLength > 32766) return null;
-
-            var buffer = new byte[cmdLength];
-            if (!ReadProcessMemory(handle, cmdBufferPtr, buffer, (IntPtr)buffer.Length, out _))
-                return null;
-
-            return System.Text.Encoding.Unicode.GetString(buffer);
+            // CommandLine UNICODE_STRING at offset 0x70 in RTL_USER_PROCESS_PARAMETERS (x64)
+            return ReadPebUnicodeString(handle, procParamsPtr, 0x70, 32766);
         }
         catch { return null; }
         finally
         {
             CloseHandle(handle);
         }
+    }
+
+    /// <summary>
+    /// Reads the ProcessParameters pointer from a process's PEB.
+    /// Returns IntPtr.Zero on failure.
+    /// </summary>
+    private static IntPtr ReadProcParamsPtr(IntPtr processHandle)
+    {
+        var pbi = new PROCESS_BASIC_INFORMATION();
+        if (NtQueryInformationProcess(processHandle, 0, ref pbi, Marshal.SizeOf(pbi), out _) != 0)
+            return IntPtr.Zero;
+
+        if (!ReadProcessMemory(processHandle, pbi.PebBaseAddress + 0x20, out IntPtr procParamsPtr, (IntPtr)IntPtr.Size, out _))
+            return IntPtr.Zero;
+
+        return procParamsPtr;
+    }
+
+    /// <summary>
+    /// Reads a UNICODE_STRING from RTL_USER_PROCESS_PARAMETERS at the given offset.
+    /// The UNICODE_STRING has Length (ushort) at offset, Buffer pointer at offset+8 (x64).
+    /// </summary>
+    private static string? ReadPebUnicodeString(IntPtr processHandle, IntPtr procParamsPtr, int offset, int maxLength)
+    {
+        if (!ReadProcessMemory(processHandle, procParamsPtr + offset, out short length, (IntPtr)2, out _))
+            return null;
+
+        if (!ReadProcessMemory(processHandle, procParamsPtr + offset + 8, out IntPtr bufferPtr, (IntPtr)IntPtr.Size, out _))
+            return null;
+
+        if (length <= 0 || length > maxLength) return null;
+
+        var buffer = new byte[length];
+        if (!ReadProcessMemory(processHandle, bufferPtr, buffer, (IntPtr)buffer.Length, out _))
+            return null;
+
+        return System.Text.Encoding.Unicode.GetString(buffer);
     }
 
     public void Dispose()

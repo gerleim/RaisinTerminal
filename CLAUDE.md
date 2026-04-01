@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Git Commits
+
+Do not append `Co-Authored-By` trailers to commit messages.
+
 ## Shell Commands
 
 **Never `cd` to the working directory before running commands.** The working directory is already set to the repo root — just run commands directly (e.g. `dotnet build RaisinTerminal.slnx`, not `cd /path/to/repo && dotnet build ...`).
@@ -115,6 +119,17 @@ child process → output bytes → AnsiParser (state machine) → TerminalEmulat
 ### Rendering notes
 
 RaisinTerminal is a full terminal emulator, not a proxy — it owns the entire rendering pipeline rather than delegating to a host terminal. This means any visual feature (character rendering, cursor shapes, selection highlights, etc.) must be implemented explicitly. For example, Unicode block drawing characters (U+2580–U+259F) are rendered as geometric primitives in `TerminalCanvas.TryDrawBlockChar` because WPF's FormattedText leaves gaps between adjacent glyphs. Cell dimensions are rounded to whole pixels with `SnapsToDevicePixels`/`UseLayoutRounding` to prevent sub-pixel seams. Consecutive empty lines can be compressed into a smaller visual space to reduce scrollback clutter.
+
+### Debugging terminal rendering issues
+
+When investigating visual glitches, garbled text, or unexpected content in the scrollback, use the per-session transcript logs at `%AppData%/RaisinTerminal/sessions/`:
+
+- **`{ContentId}.txt`** — text-only transcript (printed characters and newlines, no escape sequences). Use this to verify what text was actually written and in what order.
+- **`{ContentId}.raw`** — raw byte stream including all ANSI/VT escape sequences. Use this to trace cursor movements, screen clears, scroll region changes, and other control sequences that affect layout.
+
+Both files are append-only with timestamped markers for session start/restore and `/clear` events. To find the ContentId for a session, check the LayoutService persisted state or the filenames in the sessions directory.
+
+Enable the **ANSI Logging** setting (in Options) to additionally log all CSI/ESC operations to the event system in real time, which is useful for tracing scroll-region and cursor-positioning bugs.
 
 ### Notable behaviors
 
