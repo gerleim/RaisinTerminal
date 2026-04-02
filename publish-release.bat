@@ -6,7 +6,7 @@ setlocal
 set REPO=%~dp0
 
 :: Read version from Directory.Build.props
-for /f "tokens=2 delims=<>" %%a in ('findstr "<Version>" "%REPO%Directory.Build.props"') do set VERSION=%%a
+for /f "tokens=3 delims=<>" %%a in ('findstr "<Version>" "%REPO%Directory.Build.props"') do set VERSION=%%a
 if "%VERSION%"=="" (
     echo ERROR: Could not read Version from Directory.Build.props
     exit /b 1
