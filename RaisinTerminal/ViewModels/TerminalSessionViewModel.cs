@@ -221,14 +221,16 @@ public class TerminalSessionViewModel : ToolWindowViewModel
         rows = Math.Max(rows, 5);
 
         _emulator = new TerminalEmulator(cols, rows, App.Events);
-        _emulator.AnsiLogging = SettingsService.Current.AnsiLogging;
 
-        var sessionsDir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-            "RaisinTerminal", "sessions");
-        _transcriptLogger = new SessionTranscriptLogger(sessionsDir, ContentId);
-        _transcriptLogger.WriteMarker(RestoreCommand != null ? "Session restored" : "Session started");
-        _emulator.TranscriptLogger = _transcriptLogger;
+        if (SettingsService.Current.SessionFileLogging)
+        {
+            var sessionsDir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                "RaisinTerminal", "sessions");
+            _transcriptLogger = new SessionTranscriptLogger(sessionsDir, ContentId);
+            _transcriptLogger.WriteMarker(RestoreCommand != null ? "Session restored" : "Session started");
+            _emulator.TranscriptLogger = _transcriptLogger;
+        }
 
         _emulator.TitleChanged += title =>
         {

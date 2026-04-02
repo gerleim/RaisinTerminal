@@ -127,9 +127,7 @@ When investigating visual glitches, garbled text, or unexpected content in the s
 - **`{ContentId}.txt`** — text-only transcript (printed characters and newlines, no escape sequences). Use this to verify what text was actually written and in what order.
 - **`{ContentId}.raw`** — raw byte stream including all ANSI/VT escape sequences. Use this to trace cursor movements, screen clears, scroll region changes, and other control sequences that affect layout.
 
-Both files are append-only with timestamped markers for session start/restore and `/clear` events. To find the ContentId for a session, check the LayoutService persisted state or the filenames in the sessions directory.
-
-Enable the **ANSI Logging** setting (in Options) to additionally log all CSI/ESC operations to the event system in real time, which is useful for tracing scroll-region and cursor-positioning bugs.
+Both files are append-only with timestamped markers for session start/restore and `/clear` events. Enable the **Session file logging** setting in Options → Debug to start recording. To find the ContentId for a session, check the LayoutService persisted state or the filenames in the sessions directory.
 
 ### Notable behaviors
 

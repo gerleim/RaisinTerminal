@@ -64,11 +64,11 @@ public static class TerminalSettingsRegistry
         },
         new()
         {
-            Key = "debug.ansi-logging",
-            DisplayName = "ANSI sequence logging",
-            Description = "Log terminal ANSI operations (cursor moves, erases, scrolls, line ops) to the log file for debugging rendering issues.",
+            Key = "debug.session-file-logging",
+            DisplayName = "Session file logging",
+            Description = "Write per-session transcript files (.raw byte stream and .txt text-only) to %AppData%/RaisinTerminal/sessions/ for debugging terminal issues.",
             Category = "Debug",
-            PropertyName = "AnsiLogging",
+            PropertyName = "SessionFileLogging",
             EditorType = SettingEditorType.Bool,
             Order = 0,
         },

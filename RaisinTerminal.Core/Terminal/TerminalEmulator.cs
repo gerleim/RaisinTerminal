@@ -74,11 +74,6 @@ public class TerminalEmulator
     public bool SynchronizedOutput { get; private set; }
 
     /// <summary>
-    /// When true, logs all CSI/ESC operations to the event system for debugging.
-    /// </summary>
-    public bool AnsiLogging { get; set; }
-
-    /// <summary>
     /// When set, printed characters and newlines are written to the transcript log.
     /// </summary>
     public SessionTranscriptLogger? TranscriptLogger { get; set; }
@@ -146,12 +141,6 @@ public class TerminalEmulator
         return new CellData(' ', _fgR, _fgG, _fgB, _bgR, _bgG, _bgB);
     }
 
-    private void LogAnsi(string message)
-    {
-        if (AnsiLogging)
-            _events?.Log(this, message, category: "ANSI");
-    }
-
     private void OnPrint(char c)
     {
         if (Buffer.CursorCol >= Buffer.Columns)
@@ -182,7 +171,6 @@ public class TerminalEmulator
             case 0x0A: // LF
             case 0x0B: // VT
             case 0x0C: // FF
-                LogAnsi($"LF cursor=({Buffer.CursorRow},{Buffer.CursorCol}) scroll={Buffer.ScrollTop}-{Buffer.ScrollBottom}");
                 Buffer.LineFeed();
                 TranscriptLogger?.WriteTextNewline();
                 break;
@@ -222,14 +210,12 @@ public class TerminalEmulator
                 _reverse = _decSavedReverse; _dim = _decSavedDim; _strikethrough = _decSavedStrikethrough;
                 break;
             case 'M': // RI — Reverse Index (cursor up, scroll down if at top of scroll region)
-                LogAnsi($"RI cursor=({Buffer.CursorRow},{Buffer.CursorCol}) scroll={Buffer.ScrollTop}-{Buffer.ScrollBottom}");
                 if (Buffer.CursorRow == Buffer.ScrollTop)
                     Buffer.ScrollDownRegion(Buffer.ScrollTop, Buffer.ScrollBottom, MakeEraseCell());
                 else if (Buffer.CursorRow > 0)
                     Buffer.CursorRow--;
                 break;
             case 'D': // IND — Index (cursor down, scroll up if at bottom)
-                LogAnsi($"IND cursor=({Buffer.CursorRow},{Buffer.CursorCol}) scroll={Buffer.ScrollTop}-{Buffer.ScrollBottom}");
                 Buffer.LineFeed();
                 break;
             case 'E': // NEL — Next Line (CR + LF)
@@ -409,24 +395,19 @@ public class TerminalEmulator
                 break;
             case 'H': // CUP - Cursor Position
             case 'f':
-                LogAnsi($"CUP ({Math.Clamp(Math.Max(1, p0) - 1, 0, Buffer.Rows - 1)},{Math.Clamp(Math.Max(1, p1) - 1, 0, Buffer.Columns - 1)})");
                 Buffer.CursorRow = Math.Clamp(Math.Max(1, p0) - 1, 0, Buffer.Rows - 1);
                 Buffer.CursorCol = Math.Clamp(Math.Max(1, p1) - 1, 0, Buffer.Columns - 1);
                 break;
             case 'J': // ED - Erase in Display
-                LogAnsi($"ED {p0} cursor=({Buffer.CursorRow},{Buffer.CursorCol}) scroll={Buffer.ScrollTop}-{Buffer.ScrollBottom}");
                 EraseInDisplay(p0);
                 break;
             case 'K': // EL - Erase in Line
-                LogAnsi($"EL {p0} cursor=({Buffer.CursorRow},{Buffer.CursorCol})");
                 EraseInLine(p0);
                 break;
             case 'L': // IL - Insert Lines
-                LogAnsi($"IL {Math.Max(1, p0)} cursor=({Buffer.CursorRow},{Buffer.CursorCol}) scroll={Buffer.ScrollTop}-{Buffer.ScrollBottom}");
                 InsertLines(Math.Max(1, p0));
                 break;
             case 'M': // DL - Delete Lines
-                LogAnsi($"DL {Math.Max(1, p0)} cursor=({Buffer.CursorRow},{Buffer.CursorCol}) scroll={Buffer.ScrollTop}-{Buffer.ScrollBottom}");
                 DeleteLines(Math.Max(1, p0));
                 break;
             case 'P': // DCH - Delete Characters
@@ -438,7 +419,6 @@ public class TerminalEmulator
             case 'S': // SU - Scroll Up
                 {
                     int n = Math.Max(1, p0);
-                    LogAnsi($"SU {n} scroll={Buffer.ScrollTop}-{Buffer.ScrollBottom}");
                     var fill = MakeEraseCell();
                     for (int i = 0; i < n; i++)
                         Buffer.ScrollUpRegion(Buffer.ScrollTop, Buffer.ScrollBottom, fill);
@@ -448,7 +428,6 @@ public class TerminalEmulator
                 if (privateMarker == 0)
                 {
                     int n = Math.Max(1, p0);
-                    LogAnsi($"SD {n} scroll={Buffer.ScrollTop}-{Buffer.ScrollBottom}");
                     var fill = MakeEraseCell();
                     for (int i = 0; i < n; i++)
                         Buffer.ScrollDownRegion(Buffer.ScrollTop, Buffer.ScrollBottom, fill);
@@ -477,7 +456,6 @@ public class TerminalEmulator
             case 'r': // DECSTBM - Set Scrolling Region
                 if (p0 == 0 && p1 == 0)
                 {
-                    LogAnsi($"DECSTBM reset to 0-{Buffer.Rows - 1}");
                     // Reset to full screen
                     Buffer.ScrollTop = 0;
                     Buffer.ScrollBottom = Buffer.Rows - 1;
@@ -488,7 +466,6 @@ public class TerminalEmulator
                     int bottom = (p1 == 0 ? Buffer.Rows : p1) - 1;
                     top = Math.Clamp(top, 0, Buffer.Rows - 1);
                     bottom = Math.Clamp(bottom, 0, Buffer.Rows - 1);
-                    LogAnsi($"DECSTBM {top}-{bottom}");
                     if (top < bottom)
                     {
                         Buffer.ScrollTop = top;

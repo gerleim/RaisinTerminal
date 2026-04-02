@@ -1,6 +1,25 @@
+## .NET / Visual Studio
 bin/
 obj/
 .vs/
 *.user
 *.suo
+*.cache
+*.log
 publish/
+
+## NuGet
+packages/
+
+## Build results
+[Dd]ebug/
+[Rr]elease/
+
+## Test results
+TestResults/
+
+# Claude Code
+.claude/
+
+# Other
+_other/

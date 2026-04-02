@@ -10,7 +10,7 @@ public class AppSettings
     public bool CompressEmptyLines { get; set; }
     public bool AlertOnWaitingForInput { get; set; } = true;
     public string AlertSound { get; set; } = "system:Beep";
-    public bool AnsiLogging { get; set; }
+    public bool SessionFileLogging { get; set; }
 }
 
 public static class SettingsService

@@ -77,8 +77,6 @@ public partial class TerminalView : UserControl
     {
         // Pick up any settings changes (e.g. after Options dialog)
         Canvas.CompressEmptyLines = SettingsService.Current.CompressEmptyLines;
-        if (_vm?.Emulator != null)
-            _vm.Emulator.AnsiLogging = SettingsService.Current.AnsiLogging;
         // Reset cursor to visible on new output
         Canvas.CursorVisible = true;
         _cursorTimer?.Stop();
