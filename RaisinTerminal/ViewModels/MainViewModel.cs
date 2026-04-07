@@ -18,6 +18,7 @@ public class MainViewModel : ViewModelBase, IDisposable
     public ICommand ClaudeCodeUpdateCommand { get; }
     public ICommand AboutCommand { get; }
     public ICommand AddProjectCommand => ProjectsPanel.AddProjectCommand;
+    public ICommand AddGroupCommand => ProjectsPanel.AddGroupCommand;
 
     public ProjectsPanelViewModel ProjectsPanel { get; }
 

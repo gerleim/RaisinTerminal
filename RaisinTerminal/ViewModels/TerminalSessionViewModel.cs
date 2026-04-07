@@ -38,6 +38,9 @@ public class TerminalSessionViewModel : ToolWindowViewModel
     /// <summary>Raised on UI thread when the terminal buffer has changed and needs re-rendering.</summary>
     public event Action? RenderRequested;
 
+    /// <summary>Force a repaint (e.g. after monitor sleep/wake).</summary>
+    public void RequestRepaint() => RenderRequested?.Invoke();
+
     private string _workingDirectory = "";
     public string WorkingDirectory
     {
@@ -68,6 +71,18 @@ public class TerminalSessionViewModel : ToolWindowViewModel
     /// <summary>When set, suppresses title updates from the terminal until the title matches this value
     /// or contains a Claude status glyph, preventing flicker from cmd.exe → claude → real name.</summary>
     public string? PendingTitle { get; set; }
+
+    /// <summary>Whether transcript log files exist for this session on disk.</summary>
+    public bool HasTranscriptFiles
+    {
+        get
+        {
+            var sessionsDir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                "RaisinTerminal", "sessions");
+            return File.Exists(Path.Combine(sessionsDir, ContentId + ".txt"));
+        }
+    }
 
     /// <summary>Whether the shell has a child process running (e.g. nslookup, claude, python).</summary>
     public bool HasRunningCommand { get { RefreshProcessCache(); return _cachedHasRunning; } }
@@ -558,6 +573,38 @@ public class TerminalSessionViewModel : ToolWindowViewModel
                     if ((DateTime.UtcNow - syncStartTime).TotalMilliseconds < SyncTimeoutMs)
                         continue; // skip render, keep reading
                 }
+
+                // Post-sync grace: Claude Code's Ink TUI emits cursor positioning
+                // (including CR/LF) between sync frames. A LF at the bottom row scrolls
+                // the buffer, causing a 1-line jump that the next full redraw corrects.
+                // Batch this between-frame content with the next sync frame by briefly
+                // waiting for follow-up data before rendering.
+                if (!synced && syncStartTime != default)
+                {
+                    syncStartTime = default;
+                    pendingRead ??= stream.ReadAsync(buf, 0, buf.Length, ct);
+                    if (!pendingRead.IsCompletedSuccessfully)
+                    {
+                        var delay = Task.Delay(16, ct);
+                        await Task.WhenAny(pendingRead, delay);
+                    }
+                    while (pendingRead.IsCompletedSuccessfully)
+                    {
+                        int n = pendingRead.Result;
+                        pendingRead = null;
+                        if (n == 0) goto loopDone;
+                        _transcriptLogger?.WriteRaw(buf, 0, n);
+                        lock (_lock) { _emulator?.Feed(buf.AsSpan(0, n)); }
+                        pendingRead = stream.ReadAsync(buf, 0, buf.Length, ct);
+                    }
+                    // Re-check: if we re-entered sync mode, defer rendering
+                    synced = _emulator?.SynchronizedOutput ?? false;
+                    if (synced)
+                    {
+                        syncStartTime = DateTime.UtcNow;
+                        continue;
+                    }
+                }
                 syncStartTime = default;
 
                 // After draining all available output, check whether a TUI child
@@ -571,6 +618,7 @@ public class TerminalSessionViewModel : ToolWindowViewModel
                 // events are always processed before screen repaints during heavy output.
                 _ = dispatcher.BeginInvoke(DispatcherPriority.Render, () => RenderRequested?.Invoke());
             }
+            loopDone:;
         }
         catch (OperationCanceledException) { }
         catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"ReadOutputLoop: {ex}"); }

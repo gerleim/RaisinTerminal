@@ -7,4 +7,5 @@ public class Project
     public string HomePath { get; set; } = "";
     public string? IconPath { get; set; }
     public bool AlertOnWaitingForInput { get; set; } = true;
+    public string? GroupId { get; set; }
 }

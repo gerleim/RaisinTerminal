@@ -111,6 +111,29 @@ public class ProjectNodeViewModel : ViewModelBase
     }
 }
 
+public class ProjectGroupNodeViewModel : ViewModelBase
+{
+    public ProjectGroup Group { get; }
+
+    public string Name => Group.Name;
+
+    private bool _isExpanded = true;
+    public bool IsExpanded
+    {
+        get => _isExpanded;
+        set => SetProperty(ref _isExpanded, value);
+    }
+
+    public ObservableCollection<ProjectNodeViewModel> Projects { get; } = [];
+
+    public ProjectGroupNodeViewModel(ProjectGroup group)
+    {
+        Group = group;
+    }
+
+    public void RaiseNameChanged() => OnPropertyChanged(nameof(Name));
+}
+
 public class ProjectsPanelViewModel : ViewModelBase
 {
     private readonly ObservableCollection<ToolWindowViewModel> _documents;
@@ -120,6 +143,7 @@ public class ProjectsPanelViewModel : ViewModelBase
     private readonly Action<TerminalSessionViewModel>? _activateSession;
     private readonly Action<string, string>? _openAttachmentsWindow;
 
+    public ObservableCollection<ProjectGroupNodeViewModel> Groups { get; } = [];
     public ObservableCollection<ProjectNodeViewModel> Projects { get; } = [];
 
     private ProjectNodeViewModel? _ungroupedNode;
@@ -156,8 +180,15 @@ public class ProjectsPanelViewModel : ViewModelBase
     public ICommand OpenAttachmentCommand { get; }
     public ICommand OpenAttachmentsFolderCommand { get; }
     public ICommand OpenSlnxCommand { get; }
+    public ICommand OpenSessionTextCommand { get; }
+    public ICommand OpenSessionRawCommand { get; }
+    public ICommand AddGroupCommand { get; }
+    public ICommand RemoveGroupCommand { get; }
+    public ICommand RenameGroupCommand { get; }
+    public ICommand MoveProjectToGroupCommand { get; }
 
     private readonly List<Project> _projectList = [];
+    private readonly List<ProjectGroup> _groupList = [];
 
     public ProjectsPanelViewModel(
         ObservableCollection<ToolWindowViewModel> documents,
@@ -185,10 +216,17 @@ public class ProjectsPanelViewModel : ViewModelBase
         OpenAttachmentCommand = new RelayCommand(o => OpenAttachment(o as AttachmentItemViewModel));
         OpenAttachmentsFolderCommand = new RelayCommand(o => OpenAttachmentsFolder(o as ProjectNodeViewModel));
         OpenSlnxCommand = new RelayCommand(o => OpenSlnx(o as ProjectNodeViewModel));
+        OpenSessionTextCommand = new RelayCommand(o => OpenSessionTranscript(o as TerminalNodeViewModel, ".txt"));
+        OpenSessionRawCommand = new RelayCommand(o => OpenSessionTranscript(o as TerminalNodeViewModel, ".raw"));
+        AddGroupCommand = new RelayCommand(AddGroup);
+        RemoveGroupCommand = new RelayCommand(o => RemoveGroup(o as ProjectGroupNodeViewModel));
+        RenameGroupCommand = new RelayCommand(o => RenameGroup(o as ProjectGroupNodeViewModel));
+        MoveProjectToGroupCommand = new RelayCommand(o => MoveProjectToGroup(o as object[]));
 
         // Load persisted state
         var state = ProjectService.Load();
         _projectList.AddRange(state.Projects);
+        _groupList.AddRange(state.ProjectGroups);
         IsPanelVisible = state.PanelVisible;
         PanelWidth = state.PanelWidth > 0 ? state.PanelWidth : 240;
 
@@ -216,6 +254,7 @@ public class ProjectsPanelViewModel : ViewModelBase
         var state = new ProjectsState
         {
             Projects = _projectList.ToList(),
+            ProjectGroups = _groupList.ToList(),
             PanelVisible = IsPanelVisible,
             PanelWidth = PanelWidth
         };
@@ -307,7 +346,7 @@ public class ProjectsPanelViewModel : ViewModelBase
             var path = AttachmentService.SaveImage(image, projectId);
 
             // Find the project node and refresh its attachments
-            var projectNode = Projects.FirstOrDefault(p => p.Project.Id == projectId);
+            var projectNode = FindProjectNode(projectId);
             if (projectNode != null)
                 SyncAttachments(projectNode);
 
@@ -336,21 +375,70 @@ public class ProjectsPanelViewModel : ViewModelBase
 
     private void SyncProjectNodes(Dictionary<string, List<TerminalSessionViewModel>> matched)
     {
-        // Remove projects that no longer exist in _projectList
-        for (int i = Projects.Count - 1; i >= 0; i--)
+        // Sync group nodes
+        SyncGroupNodes();
+
+        // Partition projects: ungrouped (GroupId == null) go to root Projects,
+        // grouped projects go into their group's Projects collection
+        var ungroupedProjects = _projectList.Where(p => p.GroupId == null).ToList();
+        var validGroupIds = new HashSet<string>(_groupList.Select(g => g.Id));
+
+        // Projects whose GroupId references a deleted group become ungrouped
+        foreach (var project in _projectList)
         {
-            if (!_projectList.Any(p => p.Id == Projects[i].Project.Id))
-                Projects.RemoveAt(i);
+            if (project.GroupId != null && !validGroupIds.Contains(project.GroupId))
+            {
+                project.GroupId = null;
+                ungroupedProjects.Add(project);
+            }
+        }
+
+        SyncProjectCollection(Projects, ungroupedProjects, matched);
+
+        foreach (var groupNode in Groups)
+        {
+            var groupProjects = _projectList.Where(p => p.GroupId == groupNode.Group.Id).ToList();
+            SyncProjectCollection(groupNode.Projects, groupProjects, matched);
+        }
+    }
+
+    private void SyncGroupNodes()
+    {
+        // Remove groups no longer in _groupList
+        for (int i = Groups.Count - 1; i >= 0; i--)
+        {
+            if (!_groupList.Any(g => g.Id == Groups[i].Group.Id))
+                Groups.RemoveAt(i);
+        }
+
+        // Add new groups
+        foreach (var group in _groupList)
+        {
+            if (!Groups.Any(g => g.Group.Id == group.Id))
+                Groups.Add(new ProjectGroupNodeViewModel(group));
+        }
+    }
+
+    private static void SyncProjectCollection(
+        ObservableCollection<ProjectNodeViewModel> collection,
+        List<Project> projects,
+        Dictionary<string, List<TerminalSessionViewModel>> matched)
+    {
+        // Remove projects that no longer belong in this collection
+        for (int i = collection.Count - 1; i >= 0; i--)
+        {
+            if (!projects.Any(p => p.Id == collection[i].Project.Id))
+                collection.RemoveAt(i);
         }
 
         // Add/update project nodes
-        foreach (var project in _projectList)
+        foreach (var project in projects)
         {
-            var node = Projects.FirstOrDefault(p => p.Project.Id == project.Id);
+            var node = collection.FirstOrDefault(p => p.Project.Id == project.Id);
             if (node == null)
             {
                 node = new ProjectNodeViewModel(project);
-                Projects.Add(node);
+                collection.Add(node);
             }
 
             var terminalList = matched.TryGetValue(project.Id, out var list) ? list : [];
@@ -589,6 +677,8 @@ public class ProjectsPanelViewModel : ViewModelBase
         if (node == null) return;
         _projectList.RemoveAll(p => p.Id == node.Project.Id);
         Projects.Remove(node);
+        foreach (var g in Groups)
+            g.Projects.Remove(node);
         SaveState();
         Rebuild();
     }
@@ -648,7 +738,7 @@ public class ProjectsPanelViewModel : ViewModelBase
         if (newPath == null) return;
 
         // Replace the item in the owning project's attachment list
-        foreach (var project in Projects)
+        foreach (var project in AllProjectNodes())
         {
             var idx = project.Attachments.IndexOf(item);
             if (idx >= 0)
@@ -665,7 +755,7 @@ public class ProjectsPanelViewModel : ViewModelBase
         AttachmentService.DeleteAttachment(item.FilePath);
 
         // Remove from the owning project node
-        foreach (var project in Projects)
+        foreach (var project in AllProjectNodes())
         {
             if (project.Attachments.Remove(item))
                 break;
@@ -685,11 +775,119 @@ public class ProjectsPanelViewModel : ViewModelBase
         Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
     }
 
+    private static void OpenSessionTranscript(TerminalNodeViewModel? node, string extension)
+    {
+        if (node == null) return;
+        var sessionsDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "RaisinTerminal", "sessions");
+        var filePath = Path.Combine(sessionsDir, node.Session.ContentId + extension);
+        if (!File.Exists(filePath)) return;
+        Process.Start(new ProcessStartInfo(filePath) { UseShellExecute = true });
+    }
+
     private void OpenAttachmentsFolder(ProjectNodeViewModel? node)
     {
         if (node == null) return;
         _openAttachmentsWindow?.Invoke(node.Project.Id, node.Name);
     }
+
+    private IEnumerable<ProjectNodeViewModel> AllProjectNodes()
+    {
+        foreach (var p in Projects) yield return p;
+        foreach (var g in Groups)
+            foreach (var p in g.Projects) yield return p;
+    }
+
+    private ProjectNodeViewModel? FindProjectNode(string projectId)
+    {
+        return AllProjectNodes().FirstOrDefault(p => p.Project.Id == projectId);
+    }
+
+    private void AddGroup()
+    {
+        var dialog = new GroupNameDialog("New Group")
+        {
+            Owner = Application.Current.MainWindow
+        };
+        if (dialog.ShowDialog() != true) return;
+
+        var group = new ProjectGroup { Name = dialog.GroupName };
+        _groupList.Add(group);
+        SaveState();
+        Rebuild();
+    }
+
+    private void RemoveGroup(ProjectGroupNodeViewModel? node)
+    {
+        if (node == null) return;
+        // Ungroup all projects in this group
+        foreach (var p in _projectList.Where(p => p.GroupId == node.Group.Id))
+            p.GroupId = null;
+        _groupList.RemoveAll(g => g.Id == node.Group.Id);
+        SaveState();
+        Rebuild();
+    }
+
+    private void RenameGroup(ProjectGroupNodeViewModel? node)
+    {
+        if (node == null) return;
+        var dialog = new GroupNameDialog(node.Group.Name)
+        {
+            Owner = Application.Current.MainWindow
+        };
+        if (dialog.ShowDialog() != true) return;
+
+        node.Group.Name = dialog.GroupName;
+        node.RaiseNameChanged();
+        SaveState();
+    }
+
+    private void MoveProjectToGroup(object[]? args)
+    {
+        if (args is not { Length: 2 }) return;
+        if (args[0] is not ProjectNodeViewModel projectNode) return;
+        var groupId = args[1] as string; // null means ungrouped
+        projectNode.Project.GroupId = groupId;
+        SaveState();
+        Rebuild();
+    }
+
+    internal IReadOnlyList<ProjectGroup> GetGroups() => _groupList;
+
+    private void AddProjectToGroup(ProjectGroupNodeViewModel? groupNode)
+    {
+        if (groupNode == null) return;
+
+        var dialog = new Microsoft.Win32.OpenFolderDialog
+        {
+            Title = "Select Project Folder"
+        };
+
+        if (dialog.ShowDialog() != true) return;
+
+        var folderPath = dialog.FolderName;
+        if (_projectList.Any(p => string.Equals(
+                Path.GetFullPath(p.HomePath).TrimEnd(Path.DirectorySeparatorChar),
+                Path.GetFullPath(folderPath).TrimEnd(Path.DirectorySeparatorChar),
+                StringComparison.OrdinalIgnoreCase)))
+            return;
+
+        var project = new Project
+        {
+            Name = Path.GetFileName(folderPath),
+            HomePath = folderPath,
+            IconPath = FindBestIcon(folderPath),
+            AlertOnWaitingForInput = SettingsService.Current.AlertOnWaitingForInput,
+            GroupId = groupNode.Group.Id
+        };
+        _projectList.Add(project);
+        SaveState();
+        Rebuild();
+    }
+
+    internal void AddProjectToGroupCommand_Execute(ProjectGroupNodeViewModel? groupNode) =>
+        AddProjectToGroup(groupNode);
 
     public void StopTimer()
     {
