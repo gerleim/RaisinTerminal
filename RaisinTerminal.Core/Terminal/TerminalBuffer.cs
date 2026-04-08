@@ -142,6 +142,18 @@ public class TerminalBuffer
         CursorCol = 0;
     }
 
+    /// <summary>
+    /// Drops all saved scrollback lines. Used to implement ED 3 (ESC[3J),
+    /// which xterm defines as "erase saved lines". The visible screen is not
+    /// touched.
+    /// </summary>
+    public void ClearScrollback()
+    {
+        _scrollback.Clear();
+        _scrollbackWrapped.Clear();
+        ScrollOffset = 0;
+    }
+
     public void Resize(int cols, int rows)
     {
         var newScreen = new CellData[rows, cols];

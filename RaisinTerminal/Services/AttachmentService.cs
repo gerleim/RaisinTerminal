@@ -1,6 +1,7 @@
 using System.IO;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using Raisin.EventSystem;
 
 namespace RaisinTerminal.Services;
 
@@ -76,9 +77,19 @@ public static class AttachmentService
         return newPath;
     }
 
-    public static void DeleteAttachment(string filePath)
+    public static bool DeleteAttachment(string filePath)
     {
-        if (File.Exists(filePath))
-            File.Delete(filePath);
+        try
+        {
+            if (File.Exists(filePath))
+                File.Delete(filePath);
+            return true;
+        }
+        catch (IOException ex)
+        {
+            App.Events.Log(null!, $"Failed to delete attachment {filePath}: {ex.Message}",
+                severity: Raisin.EventSystem.MessageSeverity.Warning, category: "Attachments");
+            return false;
+        }
     }
 }

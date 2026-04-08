@@ -323,6 +323,53 @@ public class ClaudeScreenStateTests
             ClaudeScreenStateClassifier.Classify(Screen(lines), cursorRow: 2, screenRows: 5));
     }
 
+    // ── "Do you want ...?" detection ─────────────────────────────────
+
+    [Fact]
+    public void DoYouWant_NearIdlePrompt_ReturnsWaitingForInput()
+    {
+        var screen = Screen(
+            "Some output text",
+            "Do you want me to check what version you're on so the tag matches?",
+            "\u276F ");
+        Assert.Equal(TerminalStatus.WaitingForInput,
+            ClaudeScreenStateClassifier.Classify(screen, cursorRow: 2, screenRows: 3));
+    }
+
+    [Fact]
+    public void DoYouWant_FarFromIdlePrompt_ReturnsIdle()
+    {
+        // "Do you want" more than 10 rows above prompt — too far, treated as output text
+        var lines = new string[15];
+        lines[0] = "Do you want me to proceed?";
+        for (int i = 1; i < 14; i++) lines[i] = "";
+        lines[14] = "\u276F ";
+        Assert.Equal(TerminalStatus.Idle,
+            ClaudeScreenStateClassifier.Classify(Screen(lines), cursorRow: 14, screenRows: 15));
+    }
+
+    [Fact]
+    public void DoYouWant_WithWorkingSpinner_ReturnsWorking()
+    {
+        var screen = Screen(
+            "Do you want me to proceed?",
+            "\u273B Sketching\u2026 (1m 44s)",
+            "\u276F ");
+        Assert.Equal(TerminalStatus.Working,
+            ClaudeScreenStateClassifier.Classify(screen, cursorRow: 2, screenRows: 3));
+    }
+
+    [Fact]
+    public void DoYouWant_WithoutIdlePrompt_ReturnsWorking()
+    {
+        // "Do you want" without any idle prompt visible — Claude is still producing output
+        var screen = Screen(
+            "Do you want me to proceed?",
+            "Some more output");
+        Assert.Equal(TerminalStatus.Working,
+            ClaudeScreenStateClassifier.Classify(screen, cursorRow: 1, screenRows: 2));
+    }
+
     // ── Edge cases ───────────────────────────────────────────────────
 
     [Fact]

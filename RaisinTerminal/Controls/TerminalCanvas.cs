@@ -137,7 +137,12 @@ public class TerminalCanvas : FrameworkElement
         int extraRows = 0;
         double[] rowYPositions;
 
-        if (buffer.ScrollOffset > 0 && CompressEmptyLines)
+        // Disable compression on alternate screen — TUI apps expect uniform
+        // row heights; compressing interior empty rows shrinks the content
+        // while trailing rows stay full-height, creating a growing gap.
+        bool compress = CompressEmptyLines && !(Emulator?.AlternateScreen ?? false);
+
+        if (buffer.ScrollOffset > 0 && compress)
         {
             // Scrolled back: bottom-up layout with extra scrollback rows
             // to fill the canvas. Scrollback content is stable, no flickering.
@@ -170,7 +175,7 @@ public class TerminalCanvas : FrameworkElement
             // Live bottom (or compression off): top-down layout matching the
             // original behaviour — content starts at y=0, gap (if any) at bottom.
             var rowIsEmpty = new bool[baseRowCount];
-            if (CompressEmptyLines)
+            if (compress)
             {
                 for (int row = 0; row < baseRowCount; row++)
                     rowIsEmpty[row] = IsRowEmpty(buffer, row);

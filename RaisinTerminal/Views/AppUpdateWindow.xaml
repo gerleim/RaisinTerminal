@@ -1,0 +1,61 @@
+<Window x:Class="RaisinTerminal.Views.AppUpdateWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="RaisinTerminal Update"
+        Width="440" SizeToContent="Height"
+        ResizeMode="NoResize"
+        WindowStartupLocation="CenterOwner"
+        Background="{DynamicResource MaterialDesignPaper}"
+        TextElement.Foreground="{DynamicResource MaterialDesignBody}">
+    <StackPanel Margin="24">
+        <TextBlock Text="Update Available" FontSize="18" FontWeight="Bold"
+                   HorizontalAlignment="Center" Margin="0,0,0,16"/>
+
+        <!-- Version info -->
+        <Grid Margin="0,0,0,16">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <TextBlock Grid.Row="0" Grid.Column="0" Text="Current version:"
+                       FontSize="13" Margin="0,0,12,6"/>
+            <TextBlock x:Name="CurrentVersionText" Grid.Row="0" Grid.Column="1"
+                       FontSize="13" FontWeight="SemiBold" Margin="0,0,0,6"/>
+
+            <TextBlock Grid.Row="1" Grid.Column="0" Text="New version:"
+                       FontSize="13" Margin="0,0,12,6"/>
+            <TextBlock x:Name="NewVersionText" Grid.Row="1" Grid.Column="1"
+                       FontSize="13" FontWeight="SemiBold" Margin="0,0,0,6"
+                       Foreground="#66FF66"/>
+        </Grid>
+
+        <!-- Release notes (scrollable, optional) -->
+        <TextBlock x:Name="ReleaseNotesLabel" Text="Release notes:" FontSize="12"
+                   Foreground="#AAAAAA" Margin="0,0,0,4" Visibility="Collapsed"/>
+        <ScrollViewer x:Name="ReleaseNotesScroller" MaxHeight="160" Margin="0,0,0,12"
+                      VerticalScrollBarVisibility="Auto" Visibility="Collapsed">
+            <TextBlock x:Name="ReleaseNotesText" FontSize="12" TextWrapping="Wrap"
+                       Foreground="#CCCCCC"/>
+        </ScrollViewer>
+
+        <!-- Status / progress -->
+        <TextBlock x:Name="StatusText" FontSize="12" Foreground="#888888"
+                   TextWrapping="Wrap" HorizontalAlignment="Center"
+                   Margin="0,0,0,8"/>
+        <ProgressBar x:Name="ProgressBar" Height="4" Margin="0,0,0,16"
+                     Visibility="Collapsed"/>
+
+        <!-- Buttons -->
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+            <Button x:Name="DownloadButton" Content="Download &amp; Install" Width="150"
+                    Click="OnDownloadAndInstall" Margin="0,0,8,0"/>
+            <Button x:Name="SkipButton" Content="Skip" Width="80"
+                    IsCancel="True" Click="OnSkip"/>
+        </StackPanel>
+    </StackPanel>
+</Window>

@@ -16,8 +16,10 @@ public class MainViewModel : ViewModelBase, IDisposable
     public ICommand ExitCommand { get; }
     public ICommand OptionsCommand { get; }
     public ICommand ClaudeCodeUpdateCommand { get; }
+    public ICommand CheckForUpdatesCommand { get; }
     public ICommand AboutCommand { get; }
     public ICommand AddProjectCommand => ProjectsPanel.AddProjectCommand;
+    public ICommand AddGroupCommand => ProjectsPanel.AddGroupCommand;
 
     public ProjectsPanelViewModel ProjectsPanel { get; }
 
@@ -30,6 +32,7 @@ public class MainViewModel : ViewModelBase, IDisposable
         ExitCommand = new RelayCommand(() => System.Windows.Application.Current.MainWindow?.Close());
         OptionsCommand = new RelayCommand(ShowOptions);
         ClaudeCodeUpdateCommand = new RelayCommand(ShowClaudeCodeUpdate);
+        CheckForUpdatesCommand = new RelayCommand(CheckForAppUpdate);
         AboutCommand = new RelayCommand(ShowAbout);
         ProjectsPanel = new ProjectsPanelViewModel(
             Documents,
@@ -271,6 +274,25 @@ public class MainViewModel : ViewModelBase, IDisposable
         var window = new Views.OptionsWindow();
         window.Owner = System.Windows.Application.Current.MainWindow;
         window.ShowDialog();
+    }
+
+    private static async void CheckForAppUpdate()
+    {
+        var info = await Services.AppUpdateService.CheckForUpdateAsync();
+        if (info.IsUpdateAvailable)
+        {
+            var window = new Views.AppUpdateWindow(info);
+            window.Owner = System.Windows.Application.Current.MainWindow;
+            window.ShowDialog();
+        }
+        else
+        {
+            System.Windows.MessageBox.Show(
+                $"You are running the latest version ({Services.AppUpdateService.GetCurrentVersion().ToString(3)}).",
+                "Check for Updates",
+                System.Windows.MessageBoxButton.OK,
+                System.Windows.MessageBoxImage.Information);
+        }
     }
 
     private static void ShowClaudeCodeUpdate()

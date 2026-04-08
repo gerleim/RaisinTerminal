@@ -32,6 +32,7 @@
                           InputGestureText="Ctrl+Shift+N"/>
                 <Separator/>
                 <MenuItem Header="Add _Project..." Command="{Binding AddProjectCommand}"/>
+                <MenuItem Header="Add _Group..." Command="{Binding AddGroupCommand}"/>
                 <Separator/>
                 <MenuItem Header="E_xit" Command="{Binding ExitCommand}"
                           InputGestureText="Alt+F4"/>
@@ -46,6 +47,8 @@
                 <MenuItem Header="_Options" Command="{Binding OptionsCommand}"/>
             </MenuItem>
             <MenuItem Header="_Help">
+                <MenuItem Header="_Check for Updates..." Command="{Binding CheckForUpdatesCommand}"/>
+                <Separator/>
                 <MenuItem Header="_About" Command="{Binding AboutCommand}"/>
             </MenuItem>
         </Menu>
@@ -72,26 +75,30 @@
                     ToolTip="Add Project">
                 <materialDesign:PackIcon Kind="FolderPlus" Width="20" Height="20"/>
             </Button>
+            <Button Style="{StaticResource ToolbarIconButton}"
+                    Command="{Binding AddGroupCommand}"
+                    ToolTip="Add Group">
+                <materialDesign:PackIcon Kind="FolderMultiplePlus" Width="20" Height="20"/>
+            </Button>
         </ToolBar>
 
         <!-- Main content: Projects Panel + DockingManager -->
         <Grid>
             <Grid.ColumnDefinitions>
-                <ColumnDefinition x:Name="PanelColumn" Width="Auto"/>
+                <ColumnDefinition x:Name="PanelColumn" MinWidth="150"/>
                 <ColumnDefinition Width="Auto"/>
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
 
             <!-- Projects Panel -->
             <views:ProjectsPanelView Grid.Column="0"
-                                      Width="{Binding PanelWidth, Mode=TwoWay}"
-                                      MinWidth="150"
                                       DataContext="{Binding ProjectsPanel}"
                                       Visibility="{Binding IsPanelVisible, Converter={StaticResource BoolToVisConverter}}"/>
 
             <!-- Splitter -->
-            <GridSplitter Grid.Column="1" Width="3" Background="#3F3F46"
+            <GridSplitter x:Name="PanelSplitter" Grid.Column="1" Width="3" Background="#3F3F46"
                           HorizontalAlignment="Center" VerticalAlignment="Stretch"
+                          DragCompleted="PanelSplitter_DragCompleted"
                           Visibility="{Binding ProjectsPanel.IsPanelVisible, Converter={StaticResource BoolToVisConverter}}"/>
 
             <!-- AvalonDock -->

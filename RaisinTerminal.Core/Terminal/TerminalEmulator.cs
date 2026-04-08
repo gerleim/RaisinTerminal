@@ -345,10 +345,13 @@ public class TerminalEmulator
                         break;
                     case 2026: // Synchronized Output (DEC mode 2026)
                         SynchronizedOutput = set;
-                        if (!set && _syncRedrawSuppressScrollback)
+                        if (set && _syncRedrawSuppressScrollback)
                         {
-                            // End of a sync block that contained a full-screen clear:
-                            // restore normal scrollback behaviour.
+                            // Start of a new sync block after one that suppressed
+                            // scrollback.  Restore normal scrollback now — the stray
+                            // CR+LF that TUI apps (Claude Code / Ink) emit between
+                            // frames has already been absorbed while suppression was
+                            // still active.
                             _syncRedrawSuppressScrollback = false;
                             if (!AlternateScreen)
                                 Buffer.SuppressScrollback = false;
@@ -552,8 +555,14 @@ public class TerminalEmulator
                 }
                 EraseCells(0, 0, Buffer.Rows - 1, Buffer.Columns - 1, fill);
                 break;
-            case 3:
-                EraseCells(0, 0, Buffer.Rows - 1, Buffer.Columns - 1, fill);
+            case 3: // erase saved lines (scrollback)
+                // Only honor outside synchronized output: inside a DEC 2026 sync
+                // block the TUI is redrawing a frame, and tools like Claude Code
+                // emit ESC[3J every tick — wiping user scrollback in that case
+                // breaks scroll-back. Outside sync (e.g. a shell `clear`), drop
+                // saved lines per xterm semantics.
+                if (!SynchronizedOutput)
+                    Buffer.ClearScrollback();
                 break;
         }
     }

@@ -45,6 +45,8 @@ public static class ProjectService
 public class ProjectsState
 {
     public List<Project> Projects { get; set; } = [];
+    public List<ProjectGroup> ProjectGroups { get; set; } = [];
     public bool PanelVisible { get; set; } = true;
     public double PanelWidth { get; set; } = 240;
+    public Dictionary<string, bool> ExpandedState { get; set; } = [];
 }
