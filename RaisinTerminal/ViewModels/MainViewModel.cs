@@ -4,6 +4,7 @@ using Raisin.WPF.Base;
 using Raisin.WPF.Base.Models;
 using RaisinTerminal.Core.Helpers;
 using RaisinTerminal.Services;
+using RaisinTerminal.Settings;
 
 namespace RaisinTerminal.ViewModels;
 
@@ -18,8 +19,23 @@ public class MainViewModel : ViewModelBase, IDisposable
     public ICommand ClaudeCodeUpdateCommand { get; }
     public ICommand CheckForUpdatesCommand { get; }
     public ICommand AboutCommand { get; }
+    public ICommand ToggleSplitViewCommand { get; }
+    public ICommand ClearScrollbackCommand { get; }
     public ICommand AddProjectCommand => ProjectsPanel.AddProjectCommand;
     public ICommand AddGroupCommand => ProjectsPanel.AddGroupCommand;
+
+    /// <summary>Display text for menu items' InputGestureText.
+    /// Reflects the user's current binding (or default) and refreshes when bindings change.</summary>
+    public string ClearScrollbackGestureText => KeyBindingsService.Get(KeyBindingIds.ClearScrollback).ToString();
+    public string NewSessionGestureText => KeyBindingsService.Get(KeyBindingIds.NewSession).ToString();
+    public string NewClaudeSessionGestureText => KeyBindingsService.Get(KeyBindingIds.NewClaudeSession).ToString();
+    public string ToggleSplitViewGestureText => KeyBindingsService.Get(KeyBindingIds.ToggleSplitView).ToString();
+
+    public string NewSessionTooltip => FormatTooltip("New Terminal", NewSessionGestureText);
+    public string NewClaudeSessionTooltip => FormatTooltip("New Claude Terminal", NewClaudeSessionGestureText);
+
+    private static string FormatTooltip(string name, string gesture) =>
+        string.IsNullOrEmpty(gesture) ? name : $"{name} ({gesture})";
 
     public ProjectsPanelViewModel ProjectsPanel { get; }
 
@@ -34,6 +50,9 @@ public class MainViewModel : ViewModelBase, IDisposable
         ClaudeCodeUpdateCommand = new RelayCommand(ShowClaudeCodeUpdate);
         CheckForUpdatesCommand = new RelayCommand(CheckForAppUpdate);
         AboutCommand = new RelayCommand(ShowAbout);
+        ToggleSplitViewCommand = new RelayCommand(ToggleActiveSplitView);
+        ClearScrollbackCommand = new RelayCommand(ClearActiveScrollback);
+        KeyBindingsService.BindingsChanged += OnKeyBindingsChanged;
         ProjectsPanel = new ProjectsPanelViewModel(
             Documents,
             createSessionInDirectory: CreateNewSessionInDirectory,
@@ -75,10 +94,16 @@ public class MainViewModel : ViewModelBase, IDisposable
                 };
                 session.GenerateClaudeName = () => GenerateClaudeNameForSession(session);
 
-                // Start the session eagerly with default dimensions so that
-                // restore commands run immediately — not just when the tab becomes visible.
-                // The view will resize to actual dimensions when activated.
-                session.StartSession(120, 30);
+                // Start the session eagerly so restore commands run immediately —
+                // not just when the tab becomes visible. Use the per-tab dimensions
+                // saved last session (falling back to the global last-known size)
+                // so the buffer matches what the canvas will be on activation,
+                // avoiding a resize-truncation race.
+                var perTab = Services.SessionDimensionsService.Get(session.ContentId);
+                var settings = Services.SettingsService.Current;
+                int startCols = perTab?.Cols ?? settings.LastCanvasColumns;
+                int startRows = perTab?.Rows ?? settings.LastCanvasRows;
+                session.StartSession(startCols, startRows);
 
                 Documents.Add(session);
             }
@@ -162,6 +187,40 @@ public class MainViewModel : ViewModelBase, IDisposable
         Documents.Add(session);
         session.IsActive = true;
         return session;
+    }
+
+    private void ToggleActiveSplitView()
+    {
+        foreach (var doc in Documents)
+        {
+            if (doc is TerminalSessionViewModel session && session.IsActive)
+            {
+                session.RequestSplitToggle();
+                return;
+            }
+        }
+    }
+
+    private void ClearActiveScrollback()
+    {
+        foreach (var doc in Documents)
+        {
+            if (doc is TerminalSessionViewModel session && session.IsActive)
+            {
+                session.ClearScrollback();
+                return;
+            }
+        }
+    }
+
+    private void OnKeyBindingsChanged()
+    {
+        OnPropertyChanged(nameof(ClearScrollbackGestureText));
+        OnPropertyChanged(nameof(NewSessionGestureText));
+        OnPropertyChanged(nameof(NewClaudeSessionGestureText));
+        OnPropertyChanged(nameof(ToggleSplitViewGestureText));
+        OnPropertyChanged(nameof(NewSessionTooltip));
+        OnPropertyChanged(nameof(NewClaudeSessionTooltip));
     }
 
     private void CreateNewSession() => AddSession();
@@ -311,6 +370,7 @@ public class MainViewModel : ViewModelBase, IDisposable
 
     public void Dispose()
     {
+        KeyBindingsService.BindingsChanged -= OnKeyBindingsChanged;
         _rebuildGate.Dispose();
     }
 }

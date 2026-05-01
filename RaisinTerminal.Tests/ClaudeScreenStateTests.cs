@@ -435,4 +435,17 @@ public class ClaudeScreenStateTests
         Assert.Equal(TerminalStatus.Idle,
             ClaudeScreenStateClassifier.Classify(Screen(lines), cursorRow: 19, screenRows: 20));
     }
+
+    [Fact]
+    public void StaleInkSelection_FarFromCursor_NotWaiting()
+    {
+        var lines = new string[40];
+        lines[2] = "> 1. let me test the current state";
+        lines[3] = "  2. then we might do enum refactor";
+        for (int i = 4; i < 39; i++) lines[i] = "";
+        lines[38] = "Some output text";
+        lines[39] = "";
+        Assert.Equal(TerminalStatus.Working,
+            ClaudeScreenStateClassifier.Classify(Screen(lines), cursorRow: 39, screenRows: 40));
+    }
 }

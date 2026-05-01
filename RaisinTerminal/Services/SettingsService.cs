@@ -11,6 +11,12 @@ public class AppSettings
     public bool AlertOnWaitingForInput { get; set; } = true;
     public string AlertSound { get; set; } = "system:Beep";
     public bool SessionFileLogging { get; set; }
+
+    // Last observed terminal canvas size. Used to eagerly start restored
+    // sessions at dimensions close to the actual canvas, avoiding a buffer
+    // truncate/reflow race when the tab is first activated.
+    public int LastCanvasColumns { get; set; } = 120;
+    public int LastCanvasRows { get; set; } = 30;
 }
 
 public static class SettingsService

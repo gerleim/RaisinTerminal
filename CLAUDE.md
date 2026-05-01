@@ -120,6 +120,17 @@ child process → output bytes → AnsiParser (state machine) → TerminalEmulat
 
 RaisinTerminal is a full terminal emulator, not a proxy — it owns the entire rendering pipeline rather than delegating to a host terminal. This means any visual feature (character rendering, cursor shapes, selection highlights, etc.) must be implemented explicitly. For example, Unicode block drawing characters (U+2580–U+259F) are rendered as geometric primitives in `TerminalCanvas.TryDrawBlockChar` because WPF's FormattedText leaves gaps between adjacent glyphs. Cell dimensions are rounded to whole pixels with `SnapsToDevicePixels`/`UseLayoutRounding` to prevent sub-pixel seams. Consecutive empty lines can be compressed into a smaller visual space to reduce scrollback clutter.
 
+### Terminal rendering bugs — test-first policy
+
+When fixing any terminal rendering bug (line duplication, disappearance, resize glitches, scrollback corruption, splitter issues, etc.), **always write a failing test first** using `TerminalTestHarness` in `RaisinTerminal.Tests/TerminalResizeTests.cs`. Do not fix the bug through manual testing alone.
+
+1. Reproduce the bug as a test: construct the ANSI sequence scenario using the harness's fluent API (`CursorHome()`, `FeedLines()`, `Resize()`, `SetClaudeRedrawSuppression()`, etc.)
+2. If the user provides a `.raw` session log that exhibits the bug, extract the relevant byte sequence and use `FeedRaw()` or `FeedFile()` to replay it in the test
+3. Assert the expected screen and scrollback content — the test must fail before the fix and pass after
+4. Place the test in the appropriate level: Level 1 (basic text), Level 2 (resize), Level 3 (cursor/erase), Level 4 (TUI/scroll region), Level 5 (Claude suppression), Level 6 (resize during suppression)
+
+The harness is in `RaisinTerminal.Tests/TerminalTestHarness.cs`. Key assertion methods: `AssertScreenRows()`, `AssertAllScrollback()`, `AssertTotalContent()`, `AssertNoDuplicateScrollback()`, `TakeSnapshot()` / `AssertMatchesSnapshot()`.
+
 ### Debugging terminal rendering issues
 
 When investigating visual glitches, garbled text, or unexpected content in the scrollback, use the per-session transcript logs at `%AppData%/RaisinTerminal/sessions/`:

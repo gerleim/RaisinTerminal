@@ -10,7 +10,7 @@ namespace RaisinTerminal.Controls;
 /// Custom FrameworkElement for terminal rendering. Draws the character grid
 /// from TerminalBuffer using low-level DrawingContext for performance.
 /// </summary>
-public class TerminalCanvas : FrameworkElement
+public partial class TerminalCanvas : FrameworkElement
 {
     private readonly Typeface _typeface = new("Consolas");
     private readonly Typeface _typefaceBold = new(new FontFamily("Consolas"), FontStyles.Normal, FontWeights.Bold, FontStretches.Normal);
@@ -28,11 +28,18 @@ public class TerminalCanvas : FrameworkElement
     private const double EmptyRowScale = 0.35;
 
     // Row Y-positions from the last render, used by HitTest
-    private double[]? _rowYPositions;
+    internal double[]? _rowYPositions;
 
     // Number of extra scrollback rows shown above the normal viewport
     // due to empty line compression. Used by HitTest and cursor positioning.
-    private int _extraRows;
+    internal int _extraRows;
+
+    // baseRowCount used at last render. Captured for HitTest so it can recover
+    // the same display→absolute row mapping OnRender used.
+    internal int _baseRowCount;
+
+    // absRowBase from the last render, for HitTest consistency.
+    private long _absRowBase;
 
     // Glyph cache: avoids allocating a new FormattedText per cell per frame.
     // Key: (character, typeface index 0-3, fg color).
@@ -51,6 +58,13 @@ public class TerminalCanvas : FrameworkElement
     public double CellHeight => _cellHeight;
 
     public TerminalEmulator? Emulator { get; set; }
+
+    /// <summary>
+    /// Viewport driving this canvas's scroll position. Required for rendering
+    /// anything other than the live bottom of the buffer.
+    /// </summary>
+    public TerminalViewport? Viewport { get; set; }
+
     public bool CompressEmptyLines { get; set; } = true;
 
     // Cursor blinking
@@ -96,6 +110,17 @@ public class TerminalCanvas : FrameworkElement
         EnsureMeasured();
     }
 
+    /// <summary>
+    /// WPF does not re-run OnRender on layout size changes by default; without
+    /// this, dragging a GridSplitter reveals unpainted area behind the canvas
+    /// (black from the dock container) until the next output-driven repaint.
+    /// </summary>
+    protected override void OnRenderSizeChanged(SizeChangedInfo sizeInfo)
+    {
+        base.OnRenderSizeChanged(sizeInfo);
+        InvalidateVisual();
+    }
+
     private void EnsureMeasured()
     {
         if (_measured) return;
@@ -124,85 +149,101 @@ public class TerminalCanvas : FrameworkElement
         var buffer = Emulator?.Buffer;
         if (buffer == null) return;
 
+        bool topAnchor = Viewport != null && !Viewport.IsLive;
+
+        int scrollOffset = Viewport?.ScrollOffset ?? 0;
+
         // Normalize selection range
         var (selStartRow, selStartCol, selEndRow, selEndCol) = GetNormalizedSelection();
 
-        int baseRowCount = Math.Min(buffer.Rows, Rows);
+        int baseRowCount = ViewportCalculator.BaseRowCount(buffer.Rows, Rows);
+        int viewOffset = ViewportCalculator.ViewOffset(buffer.Rows, Rows);
 
-        // Build per-row emptiness flags and find cursor row.
-        int cursorRow = buffer.CursorRow;
+        int displayCursorRow = ViewportCalculator.DisplayCursorRow(buffer.CursorRow, viewOffset);
         if (!(Emulator?.CursorEnabled ?? true))
-            cursorRow = FindVisualCursorRow(buffer, baseRowCount);
+            displayCursorRow = FindVisualCursorRow(buffer, baseRowCount, scrollOffset);
 
         int extraRows = 0;
+        int displayedBaseRows = baseRowCount;
         double[] rowYPositions;
 
-        // Disable compression on alternate screen — TUI apps expect uniform
-        // row heights; compressing interior empty rows shrinks the content
-        // while trailing rows stay full-height, creating a growing gap.
         bool compress = CompressEmptyLines && !(Emulator?.AlternateScreen ?? false);
 
-        if (buffer.ScrollOffset > 0 && compress)
+        if (compress)
         {
-            // Scrolled back: bottom-up layout with extra scrollback rows
-            // to fill the canvas. Scrollback content is stable, no flickering.
             var baseIsEmpty = new bool[baseRowCount];
+            int lastMeaningful = -1;
             for (int row = 0; row < baseRowCount; row++)
-                baseIsEmpty[row] = IsRowEmpty(buffer, row);
+            {
+                baseIsEmpty[row] = IsRowEmpty(buffer, row, scrollOffset, baseRowCount);
+                if (!baseIsEmpty[row]) lastMeaningful = row;
+            }
+            if (scrollOffset == 0 && displayCursorRow > lastMeaningful && displayCursorRow < baseRowCount)
+                lastMeaningful = displayCursorRow;
+
+            if (lastMeaningful >= 0) displayedBaseRows = lastMeaningful + 1;
+            var trimmedEmpty = displayedBaseRows == baseRowCount
+                ? baseIsEmpty
+                : baseIsEmpty[..displayedBaseRows];
 
             var basePositions = RowLayoutCalculator.ComputeRowYPositions(
-                baseIsEmpty, cursorRow, _cellHeight, EmptyRowScale);
-            double savedPixels = ActualHeight - basePositions[baseRowCount];
+                trimmedEmpty, displayCursorRow, _cellHeight, EmptyRowScale);
 
-            if (savedPixels > _cellHeight)
             {
-                int availableScrollback = buffer.ScrollbackCount - buffer.ScrollOffset;
-                int maxExtra = (int)Math.Ceiling(savedPixels / (Math.Round(_cellHeight * EmptyRowScale)));
-                extraRows = Math.Min(maxExtra, Math.Max(0, availableScrollback));
+                double savedPixels = ActualHeight - basePositions[displayedBaseRows];
+                extraRows = ViewportCalculator.ExtraRowsFromCompression(
+                    savedPixels, _cellHeight, EmptyRowScale,
+                    buffer.ScrollbackCount, viewOffset, scrollOffset);
             }
 
-            int totalCandidateRows = baseRowCount + extraRows;
-            var allIsEmpty = new bool[totalCandidateRows];
-            for (int row = 0; row < totalCandidateRows; row++)
-                allIsEmpty[row] = IsRowEmptyForDisplay(buffer, row, extraRows);
+            if (extraRows == 0 && (topAnchor || displayedBaseRows < baseRowCount))
+            {
+                rowYPositions = basePositions;
+            }
+            else
+            {
+                int totalCandidateRows = displayedBaseRows + extraRows;
+                var allIsEmpty = new bool[totalCandidateRows];
+                for (int row = 0; row < totalCandidateRows; row++)
+                    allIsEmpty[row] = IsRowEmptyForDisplay(buffer, row, extraRows, scrollOffset, baseRowCount);
 
-            int adjustedCursorRow = cursorRow + extraRows;
-            rowYPositions = RowLayoutCalculator.ComputeLayout(
-                allIsEmpty, adjustedCursorRow, _cellHeight, EmptyRowScale, ActualHeight);
+                int adjustedCursorRow = displayCursorRow + extraRows;
+                if (topAnchor)
+                {
+                    rowYPositions = RowLayoutCalculator.ComputeRowYPositions(
+                        allIsEmpty, adjustedCursorRow, _cellHeight, EmptyRowScale);
+                }
+                else
+                {
+                    rowYPositions = RowLayoutCalculator.ComputeLayout(
+                        allIsEmpty, adjustedCursorRow, _cellHeight, EmptyRowScale, ActualHeight);
+                }
+            }
         }
         else
         {
-            // Live bottom (or compression off): top-down layout matching the
-            // original behaviour — content starts at y=0, gap (if any) at bottom.
-            var rowIsEmpty = new bool[baseRowCount];
-            if (compress)
-            {
-                for (int row = 0; row < baseRowCount; row++)
-                    rowIsEmpty[row] = IsRowEmpty(buffer, row);
-            }
-
             rowYPositions = RowLayoutCalculator.ComputeRowYPositions(
-                rowIsEmpty, cursorRow, _cellHeight, EmptyRowScale);
+                new bool[baseRowCount], displayCursorRow, _cellHeight, EmptyRowScale);
         }
 
-        int totalRows = baseRowCount + extraRows;
+        int totalRows = displayedBaseRows + extraRows;
         _rowYPositions = rowYPositions;
         _extraRows = extraRows;
+        _baseRowCount = baseRowCount;
 
-        // Base for converting display rows to absolute rows
-        long absRowBase = buffer.TotalLinesScrolled - buffer.ScrollOffset - extraRows;
+        long absRowBase = ViewportCalculator.AbsoluteRowBase(buffer.TotalLinesScrolled, viewOffset, scrollOffset, extraRows);
+        _absRowBase = absRowBase;
 
         for (int row = 0; row < totalRows; row++)
         {
             double y = rowYPositions[row];
             double rowH = rowYPositions[row + 1] - y;
 
-            // Skip rows fully above the canvas (clipped)
             if (rowH <= 0 || y + rowH <= 0) continue;
 
             for (int col = 0; col < buffer.Columns && col < Columns; col++)
             {
-                var cell = GetDisplayCell(buffer, row, col, extraRows);
+                var cell = GetDisplayCell(buffer, row, col, extraRows, scrollOffset, baseRowCount);
                 double x = col * _cellWidth;
 
                 // Compute effective fg/bg (swap if reverse)
@@ -309,160 +350,19 @@ public class TerminalCanvas : FrameworkElement
         // a character in the buffer, so we must respect CursorEnabled to avoid drawing
         // a stray cursor at ConPTY's internal cursor position.
         bool cursorEnabled = Emulator?.CursorEnabled ?? true;
-        int displayCursorRow = buffer.CursorRow + extraRows;
-        if (CursorVisible && cursorEnabled && buffer.ScrollOffset == 0 && displayCursorRow < totalRows && buffer.CursorCol < Columns)
+        int cursorDisplayRow = displayCursorRow + extraRows;
+        if (CursorVisible && cursorEnabled && scrollOffset == 0
+            && cursorDisplayRow >= 0 && cursorDisplayRow < totalRows
+            && buffer.CursorCol < Columns)
         {
             double cx = buffer.CursorCol * _cellWidth;
-            double cy = rowYPositions[displayCursorRow];
-            double cursorH = rowYPositions[displayCursorRow + 1] - cy;
+            double cy = rowYPositions[cursorDisplayRow];
+            double cursorH = rowYPositions[cursorDisplayRow + 1] - cy;
 
             dc.DrawRectangle(CursorBlockBrush, null, new Rect(cx, cy, _cellWidth, cursorH));
         }
     }
 
-    /// <summary>
-    /// Renders Unicode block drawing characters (U+2580–U+259F) and shade characters
-    /// as filled rectangles for pixel-perfect rendering. Returns false if the character
-    /// is not a block element.
-    /// </summary>
-    private static bool TryDrawBlockChar(DrawingContext dc, char ch, Brush brush, double x, double y, double w, double h)
-    {
-        switch (ch)
-        {
-            case '\u2580': // ▀ UPPER HALF BLOCK
-                dc.DrawRectangle(brush, null, new Rect(x, y, w, h / 2));
-                return true;
-            case '\u2581': // ▁ LOWER ONE EIGHTH BLOCK
-                dc.DrawRectangle(brush, null, new Rect(x, y + h * 7 / 8, w, h / 8));
-                return true;
-            case '\u2582': // ▂ LOWER ONE QUARTER BLOCK
-                dc.DrawRectangle(brush, null, new Rect(x, y + h * 3 / 4, w, h / 4));
-                return true;
-            case '\u2583': // ▃ LOWER THREE EIGHTHS BLOCK
-                dc.DrawRectangle(brush, null, new Rect(x, y + h * 5 / 8, w, h * 3 / 8));
-                return true;
-            case '\u2584': // ▄ LOWER HALF BLOCK
-                dc.DrawRectangle(brush, null, new Rect(x, y + h / 2, w, h / 2));
-                return true;
-            case '\u2585': // ▅ LOWER FIVE EIGHTHS BLOCK
-                dc.DrawRectangle(brush, null, new Rect(x, y + h * 3 / 8, w, h * 5 / 8));
-                return true;
-            case '\u2586': // ▆ LOWER THREE QUARTERS BLOCK
-                dc.DrawRectangle(brush, null, new Rect(x, y + h / 4, w, h * 3 / 4));
-                return true;
-            case '\u2587': // ▇ LOWER SEVEN EIGHTHS BLOCK
-                dc.DrawRectangle(brush, null, new Rect(x, y + h / 8, w, h * 7 / 8));
-                return true;
-            case '\u2588': // █ FULL BLOCK
-                dc.DrawRectangle(brush, null, new Rect(x, y, w, h));
-                return true;
-            case '\u2589': // ▉ LEFT SEVEN EIGHTHS BLOCK
-                dc.DrawRectangle(brush, null, new Rect(x, y, w * 7 / 8, h));
-                return true;
-            case '\u258A': // ▊ LEFT THREE QUARTERS BLOCK
-                dc.DrawRectangle(brush, null, new Rect(x, y, w * 3 / 4, h));
-                return true;
-            case '\u258B': // ▋ LEFT FIVE EIGHTHS BLOCK
-                dc.DrawRectangle(brush, null, new Rect(x, y, w * 5 / 8, h));
-                return true;
-            case '\u258C': // ▌ LEFT HALF BLOCK
-                dc.DrawRectangle(brush, null, new Rect(x, y, w / 2, h));
-                return true;
-            case '\u258D': // ▍ LEFT THREE EIGHTHS BLOCK
-                dc.DrawRectangle(brush, null, new Rect(x, y, w * 3 / 8, h));
-                return true;
-            case '\u258E': // ▎ LEFT ONE QUARTER BLOCK
-                dc.DrawRectangle(brush, null, new Rect(x, y, w / 4, h));
-                return true;
-            case '\u258F': // ▏ LEFT ONE EIGHTH BLOCK
-                dc.DrawRectangle(brush, null, new Rect(x, y, w / 8, h));
-                return true;
-            case '\u2590': // ▐ RIGHT HALF BLOCK
-                dc.DrawRectangle(brush, null, new Rect(x + w / 2, y, w / 2, h));
-                return true;
-            case '\u2591': // ░ LIGHT SHADE (25%)
-                dc.PushOpacity(0.25);
-                dc.DrawRectangle(brush, null, new Rect(x, y, w, h));
-                dc.Pop();
-                return true;
-            case '\u2592': // ▒ MEDIUM SHADE (50%)
-                dc.PushOpacity(0.5);
-                dc.DrawRectangle(brush, null, new Rect(x, y, w, h));
-                dc.Pop();
-                return true;
-            case '\u2593': // ▓ DARK SHADE (75%)
-                dc.PushOpacity(0.75);
-                dc.DrawRectangle(brush, null, new Rect(x, y, w, h));
-                dc.Pop();
-                return true;
-            case '\u2594': // ▔ UPPER ONE EIGHTH BLOCK
-                dc.DrawRectangle(brush, null, new Rect(x, y, w, h / 8));
-                return true;
-            case '\u2595': // ▕ RIGHT ONE EIGHTH BLOCK
-                dc.DrawRectangle(brush, null, new Rect(x + w * 7 / 8, y, w / 8, h));
-                return true;
-            case '\u2596': // ▖ QUADRANT LOWER LEFT
-                dc.DrawRectangle(brush, null, new Rect(x, y + h / 2, w / 2, h / 2));
-                return true;
-            case '\u2597': // ▗ QUADRANT LOWER RIGHT
-                dc.DrawRectangle(brush, null, new Rect(x + w / 2, y + h / 2, w / 2, h / 2));
-                return true;
-            case '\u2598': // ▘ QUADRANT UPPER LEFT
-                dc.DrawRectangle(brush, null, new Rect(x, y, w / 2, h / 2));
-                return true;
-            case '\u2599': // ▙ QUADRANT UPPER LEFT AND LOWER LEFT AND LOWER RIGHT
-                dc.DrawRectangle(brush, null, new Rect(x, y, w / 2, h)); // left full
-                dc.DrawRectangle(brush, null, new Rect(x + w / 2, y + h / 2, w / 2, h / 2)); // lower right
-                return true;
-            case '\u259A': // ▚ QUADRANT UPPER LEFT AND LOWER RIGHT
-                dc.DrawRectangle(brush, null, new Rect(x, y, w / 2, h / 2));
-                dc.DrawRectangle(brush, null, new Rect(x + w / 2, y + h / 2, w / 2, h / 2));
-                return true;
-            case '\u259B': // ▛ QUADRANT UPPER LEFT AND UPPER RIGHT AND LOWER LEFT
-                dc.DrawRectangle(brush, null, new Rect(x, y, w, h / 2)); // top full
-                dc.DrawRectangle(brush, null, new Rect(x, y + h / 2, w / 2, h / 2)); // lower left
-                return true;
-            case '\u259C': // ▜ QUADRANT UPPER LEFT AND UPPER RIGHT AND LOWER RIGHT
-                dc.DrawRectangle(brush, null, new Rect(x, y, w, h / 2)); // top full
-                dc.DrawRectangle(brush, null, new Rect(x + w / 2, y + h / 2, w / 2, h / 2)); // lower right
-                return true;
-            case '\u259D': // ▝ QUADRANT UPPER RIGHT
-                dc.DrawRectangle(brush, null, new Rect(x + w / 2, y, w / 2, h / 2));
-                return true;
-            case '\u259E': // ▞ QUADRANT UPPER RIGHT AND LOWER LEFT
-                dc.DrawRectangle(brush, null, new Rect(x + w / 2, y, w / 2, h / 2));
-                dc.DrawRectangle(brush, null, new Rect(x, y + h / 2, w / 2, h / 2));
-                return true;
-            case '\u259F': // ▟ QUADRANT UPPER RIGHT AND LOWER LEFT AND LOWER RIGHT
-                dc.DrawRectangle(brush, null, new Rect(x + w / 2, y, w / 2, h)); // right full
-                dc.DrawRectangle(brush, null, new Rect(x, y + h / 2, w / 2, h / 2)); // lower left
-                return true;
-            // Box Drawing: light horizontal line
-            case '\u2500': // ─
-            case '\u2574': // ╴ left half
-            case '\u2576': // ╶ right half
-            {
-                double cy = Math.Round(y + h / 2) + 0.5; // snap to pixel center for crisp 1px line
-                var pen = new Pen(brush, 1);
-                pen.Freeze();
-                double left = (ch == '\u2576') ? x + w / 2 : x;
-                double right = (ch == '\u2574') ? x + w / 2 : x + w;
-                dc.DrawLine(pen, new Point(left, cy), new Point(right, cy));
-                return true;
-            }
-            // Box Drawing: light vertical line
-            case '\u2502': // │
-            {
-                double cx = Math.Round(x + w / 2) + 0.5; // snap to pixel center for crisp 1px line
-                var pen = new Pen(brush, 1);
-                pen.Freeze();
-                dc.DrawLine(pen, new Point(cx, y), new Point(cx, y + h));
-                return true;
-            }
-            default:
-                return false;
-        }
-    }
 
     /// <summary>
     /// Finds the visual cursor row when the terminal cursor is hidden (TUI apps).
@@ -470,7 +370,7 @@ public class TerminalCanvas : FrameworkElement
     /// for the last row that has a reverse-video cell on an otherwise empty row.
     /// Returns -1 if not found.
     /// </summary>
-    private static int FindVisualCursorRow(TerminalBuffer buffer, int rowCount)
+    private static int FindVisualCursorRow(TerminalBuffer buffer, int rowCount, int scrollOffset)
     {
         for (int row = rowCount - 1; row >= 0; row--)
         {
@@ -479,7 +379,7 @@ public class TerminalCanvas : FrameworkElement
             int cols = buffer.Columns;
             for (int c = 0; c < cols; c++)
             {
-                var cell = buffer.GetVisibleCell(row, c);
+                var cell = buffer.GetVisibleCell(row, c, scrollOffset, rowCount);
                 if (cell.Reverse)
                     hasReverse = true;
                 else if (cell.Character != ' ' && cell.Character != '\0' && cell.Character != '\u2502')
@@ -493,30 +393,21 @@ public class TerminalCanvas : FrameworkElement
 
     /// <summary>
     /// Gets a cell for display rendering, accounting for extra scrollback rows.
-    /// Rows 0..extraRows-1 are extra scrollback; extraRows..total-1 are normal buffer rows.
+    /// The combined view (extras + base) has (baseRowCount + extraRows) rows anchored
+    /// to the bottom of the buffer's live screen at scrollOffset = 0.
     /// </summary>
-    private static CellData GetDisplayCell(TerminalBuffer buffer, int displayRow, int col, int extraRows)
-    {
-        if (displayRow < extraRows)
-        {
-            int sbIndex = buffer.ScrollbackCount - buffer.ScrollOffset - extraRows + displayRow;
-            if (sbIndex < 0 || sbIndex >= buffer.ScrollbackCount)
-                return CellData.Empty;
-            var line = buffer.GetScrollbackLine(sbIndex);
-            return col < line.Length ? line[col] : CellData.Empty;
-        }
-        return buffer.GetVisibleCell(displayRow - extraRows, col);
-    }
+    private static CellData GetDisplayCell(TerminalBuffer buffer, int displayRow, int col, int extraRows, int scrollOffset, int baseRowCount)
+        => buffer.GetVisibleCell(displayRow, col, scrollOffset, baseRowCount + extraRows);
 
     /// <summary>
     /// Checks if a display row is empty, accounting for extra scrollback rows.
     /// </summary>
-    private bool IsRowEmptyForDisplay(TerminalBuffer buffer, int displayRow, int extraRows)
+    private bool IsRowEmptyForDisplay(TerminalBuffer buffer, int displayRow, int extraRows, int scrollOffset, int baseRowCount)
     {
         int cols = buffer.Columns;
         for (int c = 0; c < cols; c++)
         {
-            var cell = GetDisplayCell(buffer, displayRow, c, extraRows);
+            var cell = GetDisplayCell(buffer, displayRow, c, extraRows, scrollOffset, baseRowCount);
             if (cell.Character != ' ' && cell.Character != '\0' && cell.Character != '\u2502')
                 return false;
             if (cell.BackgroundR != CellData.DefaultBgR || cell.BackgroundG != CellData.DefaultBgG || cell.BackgroundB != CellData.DefaultBgB)
@@ -525,12 +416,12 @@ public class TerminalCanvas : FrameworkElement
         return true;
     }
 
-    private static bool IsRowEmpty(TerminalBuffer buffer, int row)
+    private static bool IsRowEmpty(TerminalBuffer buffer, int row, int scrollOffset, int baseRowCount)
     {
         int cols = buffer.Columns;
         for (int c = 0; c < cols; c++)
         {
-            var cell = buffer.GetVisibleCell(row, c);
+            var cell = buffer.GetVisibleCell(row, c, scrollOffset, baseRowCount);
             if (cell.Character != ' ' && cell.Character != '\0' && cell.Character != '\u2502')
                 return false;
             if (cell.BackgroundR != CellData.DefaultBgR || cell.BackgroundG != CellData.DefaultBgG || cell.BackgroundB != CellData.DefaultBgB)
@@ -597,12 +488,7 @@ public class TerminalCanvas : FrameworkElement
         int totalDisplayRows = (_rowYPositions?.Length ?? 1) - 1;
         displayRow = Math.Clamp(displayRow, 0, Math.Max(0, totalDisplayRows - 1));
 
-        // Convert from display-space to absolute — must match OnRender's
-        // absRowBase formula: TotalLinesScrolled - ScrollOffset - extraRows
-        var buffer = Emulator?.Buffer;
-        long absRow = buffer != null
-            ? buffer.TotalLinesScrolled - buffer.ScrollOffset - _extraRows + displayRow
-            : displayRow;
+        long absRow = _absRowBase + displayRow;
         return (absRow, col);
     }
 

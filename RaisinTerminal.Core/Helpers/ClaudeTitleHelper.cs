@@ -31,6 +31,26 @@ public static class ClaudeTitleHelper
     }
 
     /// <summary>
+    /// Returns true if the title indicates Claude is in its main TUI loop —
+    /// either the literal "Claude Code" handshake (manual launch) or a
+    /// glyph+name title like "✳ RT 2" (post-resume / --name). Both signal
+    /// that the resume picker is past and steady-state in-place redraws
+    /// have begun.
+    /// </summary>
+    public static bool IsTuiTitle(string title)
+    {
+        if (title.Equals("Claude Code", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        var spaceIdx = title.IndexOf(' ');
+        if (spaceIdx < 0 || spaceIdx >= title.Length - 1)
+            return false;
+
+        bool isSingleCodePoint = spaceIdx == 1 || (spaceIdx == 2 && char.IsHighSurrogate(title[0]));
+        return isSingleCodePoint && !char.IsLetterOrDigit(title[0]);
+    }
+
+    /// <summary>
     /// Strips the deduplication suffix added by RefreshTitles (e.g. " (2)") from a title.
     /// </summary>
     public static string StripDedupSuffix(string title)

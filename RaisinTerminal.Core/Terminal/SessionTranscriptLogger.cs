@@ -35,21 +35,33 @@ public class SessionTranscriptLogger : IDisposable
         }
     }
 
-    public void WriteText(char c)
+    /// <summary>
+    /// Writes one screen row as a single text line (right-trimmed) plus a newline.
+    /// The text log is row-oriented — each entry mirrors a row that was on screen,
+    /// after all escape sequences, cursor moves, and erases have been resolved.
+    /// </summary>
+    public void WriteTextLine(string text)
     {
         lock (_lock)
         {
             if (_disposed) return;
-            _textWriter.Write(c);
+            _textWriter.WriteLine(text);
+            _textWriter.Flush();
         }
     }
 
-    public void WriteTextNewline()
+    /// <summary>
+    /// Writes a marker line to the .txt log only (not the .raw log). Used to demarcate
+    /// visible-screen snapshots so they don't blend into the scrollback row stream.
+    /// </summary>
+    public void WriteTextMarker(string label)
     {
+        var marker = $"--- {label}: {DateTime.Now:yyyy-MM-dd HH:mm:ss} ---";
         lock (_lock)
         {
             if (_disposed) return;
             _textWriter.WriteLine();
+            _textWriter.WriteLine(marker);
             _textWriter.Flush();
         }
     }

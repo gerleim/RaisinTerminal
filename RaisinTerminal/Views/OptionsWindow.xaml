@@ -2,8 +2,10 @@
        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
        xmlns:settings="clr-namespace:Raisin.WPF.Base.Settings;assembly=Raisin.WPF.Base"
+       xmlns:views="clr-namespace:RaisinTerminal.Views"
+       xmlns:vm="clr-namespace:RaisinTerminal.ViewModels"
        Title="Options"
-       Width="500" Height="400"
+       Width="560" Height="480"
        WindowStartupLocation="CenterOwner"
        Background="{DynamicResource MaterialDesignPaper}"
        TextElement.Foreground="{DynamicResource MaterialDesignBody}">
@@ -26,6 +28,55 @@
                 TimePairTemplate="{StaticResource SharedTimePairTemplate}"
                 IntPairTemplate="{StaticResource SharedIntPairTemplate}"
                 DoublePairTemplate="{StaticResource SharedDoublePairTemplate}"/>
+
+            <DataTemplate x:Key="KeyBindingRowTemplate" DataType="{x:Type vm:KeyBindingItemViewModel}">
+                <Grid Margin="0,4,0,12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition/>
+                        <RowDefinition/>
+                    </Grid.RowDefinitions>
+
+                    <TextBlock Grid.Row="0" Grid.Column="0"
+                               Text="{Binding DisplayName}"
+                               FontWeight="SemiBold"
+                               VerticalAlignment="Center"/>
+
+                    <Button Grid.Row="0" Grid.Column="1"
+                            Content="{Binding DisplayText}"
+                            Click="OnCaptureClick"
+                            PreviewKeyDown="OnCaptureKeyDown"
+                            LostKeyboardFocus="OnCaptureLostFocus"
+                            MinWidth="140" Margin="8,0,4,0" Padding="8,2"/>
+
+                    <Button Grid.Row="0" Grid.Column="2"
+                            Content="Reset"
+                            Command="{Binding ResetCommand}"
+                            MinWidth="60" Margin="0,0,4,0" Padding="8,2"
+                            ToolTip="Reset to default chord"/>
+
+                    <Button Grid.Row="0" Grid.Column="3"
+                            Content="Clear"
+                            Command="{Binding ClearCommand}"
+                            MinWidth="60" Padding="8,2"
+                            ToolTip="Unbind this command"/>
+
+                    <TextBlock Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="4"
+                               Text="{Binding Description}"
+                               TextWrapping="Wrap"
+                               Opacity="0.7"
+                               Margin="0,2,0,0"/>
+                </Grid>
+            </DataTemplate>
+
+            <views:KeyBindingDisplayItemTemplateSelector x:Key="KeyBindingDisplaySelector"
+                CategoryHeaderTemplate="{StaticResource SharedCategoryHeaderTemplate}"
+                RowTemplate="{StaticResource KeyBindingRowTemplate}"/>
         </ResourceDictionary>
     </Window.Resources>
 
@@ -37,10 +88,20 @@
             <Button Content="Cancel" Width="80" IsCancel="True" Click="OnCancel"/>
         </StackPanel>
 
-        <!-- Settings list -->
-        <ScrollViewer VerticalScrollBarVisibility="Auto">
-            <ItemsControl ItemsSource="{Binding DisplayItems}"
-                          ItemTemplateSelector="{StaticResource SettingItemSelector}"/>
-        </ScrollViewer>
+        <TabControl>
+            <TabItem Header="General">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="0,8,0,0">
+                    <ItemsControl ItemsSource="{Binding DisplayItems}"
+                                  ItemTemplateSelector="{StaticResource SettingItemSelector}"/>
+                </ScrollViewer>
+            </TabItem>
+
+            <TabItem Header="Key Bindings">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="0,8,0,0">
+                    <ItemsControl ItemsSource="{Binding KeyBindingDisplayItems}"
+                                  ItemTemplateSelector="{StaticResource KeyBindingDisplaySelector}"/>
+                </ScrollViewer>
+            </TabItem>
+        </TabControl>
     </DockPanel>
 </Window>

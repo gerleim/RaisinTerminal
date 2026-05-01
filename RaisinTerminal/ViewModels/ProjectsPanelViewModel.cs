@@ -4,8 +4,6 @@ using System.Diagnostics;
 using System.IO;
 using System.Windows;
 using System.Windows.Input;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using Raisin.WPF.Base;
 using RaisinTerminal.Core.Helpers;
@@ -16,125 +14,7 @@ using RaisinTerminal.Views;
 
 namespace RaisinTerminal.ViewModels;
 
-public class TerminalNodeViewModel : ViewModelBase
-{
-    public TerminalSessionViewModel Session { get; }
-
-    private string _title = "";
-    public string Title
-    {
-        get => _title;
-        set => SetProperty(ref _title, value);
-    }
-
-    private TerminalStatus _status;
-    public TerminalStatus Status
-    {
-        get => _status;
-        set => SetProperty(ref _status, value);
-    }
-
-    public TerminalNodeViewModel(TerminalSessionViewModel session)
-    {
-        Session = session;
-        Title = session.Title;
-    }
-}
-
-public class AttachmentItemViewModel : ViewModelBase
-{
-    public string FilePath { get; }
-    public string FileName => Path.GetFileName(FilePath);
-
-    public AttachmentItemViewModel(string filePath)
-    {
-        FilePath = filePath;
-    }
-}
-
-public class ProjectNodeViewModel : ViewModelBase
-{
-    public Project Project { get; }
-
-    public string Name => Project.Name;
-    public string HomePath => Project.HomePath;
-
-    private bool _isExpanded = true;
-    public bool IsExpanded
-    {
-        get => _isExpanded;
-        set => SetProperty(ref _isExpanded, value);
-    }
-
-    private ImageSource? _iconSource;
-    public ImageSource? IconSource
-    {
-        get => _iconSource;
-        set => SetProperty(ref _iconSource, value);
-    }
-
-    public string? SlnxPath => Directory.GetFiles(HomePath, "*.slnx").FirstOrDefault();
-    public bool HasSlnx => SlnxPath != null;
-
-    public ObservableCollection<TerminalNodeViewModel> Terminals { get; } = [];
-    public ObservableCollection<AttachmentItemViewModel> Attachments { get; } = [];
-
-    public ProjectNodeViewModel(Project project)
-    {
-        Project = project;
-        LoadIcon();
-    }
-
-    public void RaiseNameChanged() => OnPropertyChanged(nameof(Name));
-
-    public void LoadIcon()
-    {
-        IconSource = null;
-        if (string.IsNullOrEmpty(Project.IconPath) || !File.Exists(Project.IconPath))
-            return;
-
-        try
-        {
-            var bmp = new BitmapImage();
-            bmp.BeginInit();
-            bmp.UriSource = new Uri(Project.IconPath, UriKind.Absolute);
-            bmp.DecodePixelWidth = 32;
-            bmp.CacheOption = BitmapCacheOption.OnLoad;
-            bmp.EndInit();
-            bmp.Freeze();
-            IconSource = bmp;
-        }
-        catch
-        {
-            // Icon file corrupt or unreadable — keep folder fallback
-        }
-    }
-}
-
-public class ProjectGroupNodeViewModel : ViewModelBase
-{
-    public ProjectGroup Group { get; }
-
-    public string Name => Group.Name;
-
-    private bool _isExpanded = true;
-    public bool IsExpanded
-    {
-        get => _isExpanded;
-        set => SetProperty(ref _isExpanded, value);
-    }
-
-    public ObservableCollection<ProjectNodeViewModel> Projects { get; } = [];
-
-    public ProjectGroupNodeViewModel(ProjectGroup group)
-    {
-        Group = group;
-    }
-
-    public void RaiseNameChanged() => OnPropertyChanged(nameof(Name));
-}
-
-public class ProjectsPanelViewModel : ViewModelBase
+public partial class ProjectsPanelViewModel : ViewModelBase
 {
     private readonly ObservableCollection<ToolWindowViewModel> _documents;
     private readonly DispatcherTimer _refreshTimer;
@@ -572,104 +452,6 @@ public class ProjectsPanelViewModel : ViewModelBase
     private static bool IsSubPath(string path, string basePath) =>
         PathHelper.IsSubPath(path, basePath);
 
-    private static readonly HashSet<string> SkipDirs = new(StringComparer.OrdinalIgnoreCase)
-        { "bin", "obj", "node_modules", ".git", "packages", ".vs", ".idea", "TestResults" };
-
-    internal static string? FindBestIcon(string rootPath)
-    {
-        var candidates = new List<string>();
-        CollectIcoFiles(rootPath, candidates, depth: 0, maxDepth: 4);
-
-        if (candidates.Count == 0) return null;
-        if (candidates.Count == 1) return candidates[0];
-
-        // Score each candidate
-        string? best = null;
-        int bestScore = int.MinValue;
-
-        foreach (var icoPath in candidates)
-        {
-            int score = 0;
-            var dir = Path.GetDirectoryName(icoPath)!;
-            var fileName = Path.GetFileName(icoPath);
-
-            // Prefer app.ico over other names
-            if (string.Equals(fileName, "app.ico", StringComparison.OrdinalIgnoreCase))
-                score += 2;
-
-            // Check path segments for hints
-            var relativePath = icoPath.Substring(rootPath.Length).ToLowerInvariant();
-            if (relativePath.Contains("wpf") || relativePath.Contains("desktop") || relativePath.Contains(".ui"))
-                score += 3;
-            if (relativePath.Contains("test"))
-                score -= 5;
-
-            // Fewer directory levels = closer to root = better
-            int depth = relativePath.Count(c => c == '\\' || c == '/');
-            score += Math.Max(0, 5 - depth);
-
-            // Find nearest .csproj and check for WPF/WinExe indicators
-            var csproj = FindNearestCsproj(dir, rootPath);
-            if (csproj != null)
-            {
-                try
-                {
-                    var content = File.ReadAllText(csproj);
-                    if (content.Contains("<UseWPF>true</UseWPF>", StringComparison.OrdinalIgnoreCase))
-                        score += 10;
-                    if (content.Contains("<OutputType>WinExe</OutputType>", StringComparison.OrdinalIgnoreCase))
-                        score += 5;
-                    if (content.Contains("<OutputType>Exe</OutputType>", StringComparison.OrdinalIgnoreCase))
-                        score += 2;
-                }
-                catch { }
-            }
-
-            if (score > bestScore)
-            {
-                bestScore = score;
-                best = icoPath;
-            }
-        }
-
-        return best;
-    }
-
-    private static void CollectIcoFiles(string dir, List<string> results, int depth, int maxDepth)
-    {
-        if (depth > maxDepth) return;
-
-        try
-        {
-            foreach (var file in Directory.EnumerateFiles(dir, "*.ico"))
-                results.Add(file);
-
-            foreach (var subDir in Directory.EnumerateDirectories(dir))
-            {
-                var dirName = Path.GetFileName(subDir);
-                if (!SkipDirs.Contains(dirName))
-                    CollectIcoFiles(subDir, results, depth + 1, maxDepth);
-            }
-        }
-        catch { } // Access denied, etc.
-    }
-
-    private static string? FindNearestCsproj(string dir, string rootPath)
-    {
-        var current = dir;
-        while (current != null && current.StartsWith(rootPath, StringComparison.OrdinalIgnoreCase))
-        {
-            try
-            {
-                var csprojs = Directory.GetFiles(current, "*.csproj");
-                if (csprojs.Length > 0) return csprojs[0];
-            }
-            catch { }
-            current = Path.GetDirectoryName(current);
-        }
-        return null;
-    }
-
     private void AddProject()
     {
         var dialog = new Microsoft.Win32.OpenFolderDialog
@@ -730,13 +512,32 @@ public class ProjectsPanelViewModel : ViewModelBase
     private void NewTerminalHere(ProjectNodeViewModel? node)
     {
         if (node == null || string.IsNullOrEmpty(node.HomePath)) return;
+        if (!Directory.Exists(node.HomePath))
+        {
+            ShowFolderMissingWarning(node.HomePath);
+            return;
+        }
         _createSessionInDirectory?.Invoke(node.HomePath);
     }
 
     private void NewClaudeTerminalHere(ProjectNodeViewModel? node)
     {
         if (node == null || string.IsNullOrEmpty(node.HomePath)) return;
+        if (!Directory.Exists(node.HomePath))
+        {
+            ShowFolderMissingWarning(node.HomePath);
+            return;
+        }
         _createClaudeSessionInDirectory?.Invoke(node.HomePath);
+    }
+
+    private static void ShowFolderMissingWarning(string path)
+    {
+        MessageBox.Show(
+            $"The project folder no longer exists:\n\n{path}\n\nIt may have been deleted or moved.",
+            "Folder Not Found",
+            MessageBoxButton.OK,
+            MessageBoxImage.Warning);
     }
 
     private void ActivateTerminal(TerminalNodeViewModel? node)

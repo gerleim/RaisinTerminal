@@ -16,20 +16,15 @@
         TextOptions.TextRenderingMode="Auto"
         FontFamily="{DynamicResource MaterialDesignFont}">
 
-    <Window.InputBindings>
-        <KeyBinding Key="N" Modifiers="Control" Command="{Binding NewSessionCommand}"/>
-        <KeyBinding Key="N" Modifiers="Control+Shift" Command="{Binding NewClaudeSessionCommand}"/>
-    </Window.InputBindings>
-
     <DockPanel>
         <!-- Menu Bar -->
         <Menu DockPanel.Dock="Top" Background="#2D2D2D"
               materialDesign:MenuAssist.TopLevelMenuItemHeight="36">
             <MenuItem Header="_File">
                 <MenuItem Header="_New Terminal" Command="{Binding NewSessionCommand}"
-                          InputGestureText="Ctrl+N"/>
+                          InputGestureText="{Binding NewSessionGestureText}"/>
                 <MenuItem Header="New _Claude Terminal" Command="{Binding NewClaudeSessionCommand}"
-                          InputGestureText="Ctrl+Shift+N"/>
+                          InputGestureText="{Binding NewClaudeSessionGestureText}"/>
                 <Separator/>
                 <MenuItem Header="Add _Project..." Command="{Binding AddProjectCommand}"/>
                 <MenuItem Header="Add _Group..." Command="{Binding AddGroupCommand}"/>
@@ -40,6 +35,10 @@
             <MenuItem Header="_View">
                 <MenuItem Header="_Projects Panel" IsCheckable="True"
                           IsChecked="{Binding ProjectsPanel.IsPanelVisible}"/>
+                <MenuItem Header="_Split Terminal" Command="{Binding ToggleSplitViewCommand}"
+                          InputGestureText="{Binding ToggleSplitViewGestureText}"/>
+                <MenuItem Header="Clear Scroll_back" Command="{Binding ClearScrollbackCommand}"
+                          InputGestureText="{Binding ClearScrollbackGestureText}"/>
             </MenuItem>
             <MenuItem Header="_Tools">
                 <MenuItem Header="_Claude Code Update..." Command="{Binding ClaudeCodeUpdateCommand}"/>
@@ -62,12 +61,12 @@
             </ToggleButton>
             <Button Style="{StaticResource ToolbarIconButton}"
                     Command="{Binding NewSessionCommand}"
-                    ToolTip="New Terminal (Ctrl+N)">
+                    ToolTip="{Binding NewSessionTooltip}">
                 <materialDesign:PackIcon Kind="Plus" Width="20" Height="20"/>
             </Button>
             <Button Style="{StaticResource ToolbarIconButton}"
                     Command="{Binding NewClaudeSessionCommand}"
-                    ToolTip="New Claude Terminal (Ctrl+Shift+N)">
+                    ToolTip="{Binding NewClaudeSessionTooltip}">
                 <materialDesign:PackIcon Kind="Console" Width="20" Height="20"/>
             </Button>
             <Button Style="{StaticResource ToolbarIconButton}"
@@ -102,7 +101,8 @@
                           Visibility="{Binding ProjectsPanel.IsPanelVisible, Converter={StaticResource BoolToVisConverter}}"/>
 
             <!-- AvalonDock -->
-            <avalonDock:DockingManager x:Name="DockingManager" Grid.Column="2" AllowMixedOrientation="True">
+            <avalonDock:DockingManager x:Name="DockingManager" Grid.Column="2" AllowMixedOrientation="True"
+                                       Background="#212121">
                 <avalonDock:DockingManager.DocumentHeaderTemplate>
                     <DataTemplate>
                         <TextBlock Text="{Binding Title}"/>

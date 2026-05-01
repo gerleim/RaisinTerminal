@@ -265,4 +265,174 @@ public class TerminalEmulatorTests
         Feed(emu, "\x1b[?2026l"); // disable
         Assert.False(emu.SynchronizedOutput);
     }
+
+    [Fact]
+    public void ClaudeRedrawSuppression_CursorHomeSuppressesScrollbackOnNextScroll()
+    {
+        // Mirrors a Claude Code spinner-phase redraw that uses [H + per-line
+        // rewrite without ED 2 or DEC 2026. The trailing newlines past viewport
+        // bottom must NOT push duplicates into scrollback. The first frame after
+        // activation is the initial render and is allowed through; the second
+        // (steady-state spinner redraw) must suppress.
+        var emu = Create(20, 4);
+        emu.ClaudeRedrawSuppression = true;
+
+        // Frame 1 — initial render — flows to scrollback.
+        Feed(emu, "\x1b[H");
+        Feed(emu, "L0\r\nL1\r\nL2\r\nL3\r\nL4");
+        int after1 = emu.Buffer.ScrollbackCount;
+
+        // Frame 2 — steady-state spinner redraw — must NOT add to scrollback.
+        Feed(emu, "\x1b[H");
+        Feed(emu, "L0\r\nL1\r\nL2\r\nL3\r\nL4");
+        Assert.Equal(after1, emu.Buffer.ScrollbackCount);
+    }
+
+    [Fact]
+    public void ClaudeRedrawSuppression_DisabledWithoutFlag()
+    {
+        // Same input as above but without ClaudeRedrawSuppression — the LFs
+        // should scroll content into scrollback as normal.
+        var emu = Create(20, 4);
+
+        Feed(emu, "\x1b[H");
+        Feed(emu, "L0\r\nL1\r\nL2\r\nL3\r\nL4");
+
+        Assert.True(emu.Buffer.ScrollbackCount >= 1);
+    }
+
+    [Fact]
+    public void ClaudeRedrawSuppression_FirstFrameAfterActivationFlowsToScrollback()
+    {
+        // Mirrors a Claude --resume: suppression flips on, then Claude does its
+        // ONE-FRAME initial-history render (CUP 1;1 + many LFs). That first frame
+        // must NOT suppress, so the conversation history reaches scrollback. Only
+        // subsequent frames (steady-state spinner) should suppress.
+        var emu = Create(20, 4);
+        emu.ClaudeRedrawSuppression = true;
+
+        // Frame 1: initial render — should leak rows into scrollback.
+        Feed(emu, "\x1b[H");
+        Feed(emu, "H0\r\nH1\r\nH2\r\nH3\r\nH4\r\nH5\r\nH6");
+        int afterFirstFrame = emu.Buffer.ScrollbackCount;
+        Assert.True(afterFirstFrame >= 3, $"initial render must populate scrollback (got {afterFirstFrame})");
+
+        // Frame 2: steady-state spinner redraw — should suppress.
+        Feed(emu, "\x1b[H");
+        Feed(emu, "S0\r\nS1\r\nS2\r\nS3\r\nS4\r\nS5\r\nS6");
+        Assert.Equal(afterFirstFrame, emu.Buffer.ScrollbackCount);
+    }
+
+    [Fact]
+    public void ClaudeRedrawSuppression_DeferredOverflowCommitsOnExit()
+    {
+        // A Claude response that grows beyond the viewport must not lose its
+        // top rows. Growth overflow is deferred during frames and only the NEW
+        // rows (not already committed by the initial frame) are flushed on exit.
+        var emu = Create(20, 4);
+        emu.ClaudeRedrawSuppression = true;
+
+        // Frame 1: initial render (5 lines in 4-row viewport → 1 overflow).
+        Feed(emu, "\x1b[H");
+        Feed(emu, "L0\r\nL1\r\nL2\r\nL3\r\nL4");
+        int afterInitial = emu.Buffer.ScrollbackCount;
+        Assert.True(afterInitial >= 1);
+
+        // Frame 2: steady-state, same size — deferred, not in scrollback yet.
+        Feed(emu, "\x1b[H");
+        Feed(emu, "L0\r\nL1\r\nL2\r\nL3\r\nL4");
+        Assert.Equal(afterInitial, emu.Buffer.ScrollbackCount);
+
+        // Frame 3: response grows (7 lines → 3 overflow deferred, but 1 overlaps
+        // with initial frame's committed row, so only 2 are new).
+        Feed(emu, "\x1b[H");
+        Feed(emu, "L0\r\nL1\r\nL2\r\nL3\r\nL4\r\nL5\r\nL6");
+        Assert.Equal(afterInitial, emu.Buffer.ScrollbackCount);
+
+        // Claude exits → only new growth rows committed (L1, L2), not L0 again.
+        emu.ClaudeRedrawSuppression = false;
+        int flushed = emu.Buffer.ScrollbackCount - afterInitial;
+        Assert.Equal(2, flushed);
+    }
+
+    [Fact]
+    public void ClaudeRedrawSuppression_DeferredOverflowReplacedEachFrame()
+    {
+        // Each frame clears the previous frame's deferred rows so only the
+        // latest frame's overflow survives. When the content is identical to the
+        // initial frame, all deferred rows are duplicates and nothing is flushed.
+        var emu = Create(20, 4);
+        emu.ClaudeRedrawSuppression = true;
+
+        // Frame 1: initial render
+        Feed(emu, "\x1b[H");
+        Feed(emu, "A\r\nB\r\nC\r\nD\r\nE");
+        int afterInitial = emu.Buffer.ScrollbackCount;
+
+        // Frames 2-4: identical spinner redraws (1 overflow each)
+        for (int i = 0; i < 3; i++)
+        {
+            Feed(emu, "\x1b[H");
+            Feed(emu, "A\r\nB\r\nC\r\nD\r\nE");
+        }
+        Assert.Equal(afterInitial, emu.Buffer.ScrollbackCount);
+
+        // Exit: deferred row is a duplicate of what initial frame committed → 0 flushed.
+        emu.ClaudeRedrawSuppression = false;
+        int flushed = emu.Buffer.ScrollbackCount - afterInitial;
+        Assert.Equal(0, flushed);
+    }
+
+    [Fact]
+    public void ClaudeRedrawSuppression_SkipResetsAfterClaudeExitAndRestart()
+    {
+        // After Claude exits and restarts, the next first-frame should again be
+        // treated as initial render and flow into scrollback.
+        var emu = Create(20, 4);
+        emu.ClaudeRedrawSuppression = true;
+        Feed(emu, "\x1b[H");
+        Feed(emu, "A\r\nB\r\nC\r\nD\r\nE\r\nF");
+        Feed(emu, "\x1b[H");
+        Feed(emu, "X\r\nY\r\nZ\r\nW\r\nV\r\nU"); // suppressed (steady-state)
+
+        emu.ClaudeRedrawSuppression = false;
+        emu.ClaudeRedrawSuppression = true;     // re-enter Claude — skip flag re-armed
+
+        int before = emu.Buffer.ScrollbackCount;
+        Feed(emu, "\x1b[H");
+        Feed(emu, "P\r\nQ\r\nR\r\nS\r\nT\r\nU");
+        Assert.True(emu.Buffer.ScrollbackCount > before, "post-restart first frame must reach scrollback");
+    }
+
+    [Fact]
+    public void Resize_LiftsSyncSuppressionForConPtyReflow()
+    {
+        var emu = Create(10, 6);
+        for (int i = 0; i < 6; i++)
+        {
+            emu.Buffer.CursorRow = i;
+            emu.Buffer.CursorCol = 0;
+            emu.Buffer.PutChar((char)('A' + i));
+        }
+        emu.Buffer.CursorRow = 5;
+
+        emu.ClaudeRedrawSuppression = true;
+        Feed(emu, "\x1b[H");
+        Feed(emu, "\x1b[H");
+        Assert.True(emu.Buffer.SuppressScrollback, "SuppressScrollback should be active before resize");
+
+        emu.Resize(10, 4);
+
+        Assert.False(emu.Buffer.SuppressScrollback, "SuppressScrollback should be lifted after resize");
+
+        // Grace covers exactly one Feed() batch — ConPTY's reflow can include
+        // both ED 2 and CUP 1;1 in a single batch without re-enabling suppression.
+        Feed(emu, "\x1b[2J\x1b[H");
+        Assert.False(emu.Buffer.SuppressScrollback, "Reflow batch must not re-enable suppression");
+
+        // Grace cleared after Feed() returns. Next Feed() (Claude's redraw)
+        // restores suppression.
+        Feed(emu, "\x1b[H");
+        Assert.True(emu.Buffer.SuppressScrollback, "Claude's redraw CUP 1;1 should re-enable suppression");
+    }
 }

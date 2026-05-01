@@ -71,7 +71,7 @@ public partial class ProjectPropertiesWindow : Window
         var dialog = new Microsoft.Win32.OpenFileDialog
         {
             Title = "Select Icon",
-            Filter = "Icon files (*.ico)|*.ico|All files (*.*)|*.*",
+            Filter = "Image files (*.ico;*.png;*.jpg;*.jpeg;*.bmp;*.gif)|*.ico;*.png;*.jpg;*.jpeg;*.bmp;*.gif|All files (*.*)|*.*",
             InitialDirectory = HomePathBox.Text
         };
 

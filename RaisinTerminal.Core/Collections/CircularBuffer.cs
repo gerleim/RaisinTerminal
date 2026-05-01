@@ -8,7 +8,7 @@ public class CircularBuffer<T>
 {
     private readonly T[] _items;
     private int _head; // index of the next write position
-    private bool _full;
+    private int _count;
 
     public CircularBuffer(int capacity)
     {
@@ -18,7 +18,7 @@ public class CircularBuffer<T>
 
     public int Capacity => _items.Length;
 
-    public int Count => _full ? _items.Length : _head;
+    public int Count => _count;
 
     /// <summary>
     /// Adds an item. If the buffer is full, the oldest item is overwritten.
@@ -26,13 +26,10 @@ public class CircularBuffer<T>
     /// </summary>
     public bool Add(T item)
     {
-        bool evicted = _full;
+        bool evicted = _count == _items.Length;
         _items[_head] = item;
         _head = (_head + 1) % _items.Length;
-        if (!_full && _head == 0)
-            _full = true;
-        else if (evicted)
-            _full = true;
+        if (!evicted) _count++;
         return evicted;
     }
 
@@ -43,19 +40,27 @@ public class CircularBuffer<T>
     {
         get
         {
-            if (index < 0 || index >= Count)
+            if (index < 0 || index >= _count)
                 throw new ArgumentOutOfRangeException(nameof(index));
-            int realIndex = _full
-                ? (_head + index) % _items.Length
-                : index;
-            return _items[realIndex];
+            int start = (_head - _count + _items.Length) % _items.Length;
+            return _items[(start + index) % _items.Length];
         }
+    }
+
+    /// <summary>
+    /// Removes the N most recently added items (from the newest end).
+    /// </summary>
+    public void RemoveNewest(int n)
+    {
+        n = Math.Min(n, _count);
+        _head = (_head - n + _items.Length) % _items.Length;
+        _count -= n;
     }
 
     public void Clear()
     {
         _head = 0;
-        _full = false;
+        _count = 0;
         Array.Clear(_items);
     }
 }

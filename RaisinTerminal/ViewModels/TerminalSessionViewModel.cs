@@ -12,7 +12,7 @@ using RaisinTerminal.Services;
 
 namespace RaisinTerminal.ViewModels;
 
-public class TerminalSessionViewModel : ToolWindowViewModel
+public partial class TerminalSessionViewModel : ToolWindowViewModel
 {
     private ConPtySession? _conPty;
     private TerminalEmulator? _emulator;
@@ -20,17 +20,7 @@ public class TerminalSessionViewModel : ToolWindowViewModel
     private readonly object _lock = new();
     private readonly Channel<byte[]> _writeChannel = Channel.CreateUnbounded<byte[]>(
         new UnboundedChannelOptions { SingleReader = true });
-    private int _inputSuppressionCount;
-    private readonly Queue<byte[]> _inputQueue = new();
-    private bool _claudeReady;
     private SessionTranscriptLogger? _transcriptLogger;
-
-    // TUI exit cleanup: track child process in the output loop to detect Claude exit.
-    // Uses a timed window (not one-shot) because ConPTY sends output in multiple
-    // batches — a later batch can re-introduce artifacts after a single cleanup pass.
-    private string? _outputLoopChildName;
-    private DateTime _lastChildCheckTime;
-    private DateTime? _claudeExitTime;
 
     public ICommand CloseCommand { get; }
     public TerminalEmulator? Emulator => _emulator;
@@ -40,6 +30,28 @@ public class TerminalSessionViewModel : ToolWindowViewModel
 
     /// <summary>Force a repaint (e.g. after monitor sleep/wake).</summary>
     public void RequestRepaint() => RenderRequested?.Invoke();
+
+    /// <summary>
+    /// Raised when an external command (e.g. the View menu) asks to toggle
+    /// split view for this session. The view listens and calls ToggleSplit().
+    /// </summary>
+    public event Action? SplitToggleRequested;
+
+    /// <summary>Requests the view to toggle its split-pane state.</summary>
+    public void RequestSplitToggle() => SplitToggleRequested?.Invoke();
+
+    /// <summary>
+    /// Drops all saved scrollback lines from this session's buffer. The visible
+    /// screen is left untouched. Triggers a repaint so viewports update.
+    /// </summary>
+    public void ClearScrollback()
+    {
+        lock (_lock)
+        {
+            _emulator?.Buffer.ClearScrollback();
+        }
+        RenderRequested?.Invoke();
+    }
 
     private string _workingDirectory = "";
     public string WorkingDirectory
@@ -57,13 +69,6 @@ public class TerminalSessionViewModel : ToolWindowViewModel
 
     /// <summary>The last command the user typed (tracked for session restore).</summary>
     public string LastCommand { get; set; } = "";
-
-    /// <summary>The Claude session display name (set via --name, used for --resume).</summary>
-    public string? ClaudeSessionName { get; set; }
-
-    /// <summary>Callback to generate a unique Claude session name (e.g. "RT 1").
-    /// Set by MainViewModel; invoked when Claude starts without a pre-set name.</summary>
-    public Func<string>? GenerateClaudeName { get; set; }
 
     /// <summary>Whether the emulator is currently in alternate screen mode.</summary>
     public bool IsInAlternateScreen => _emulator?.AlternateScreen ?? false;
@@ -252,64 +257,11 @@ public class TerminalSessionViewModel : ToolWindowViewModel
             Dispatcher.CurrentDispatcher.BeginInvoke(() =>
             {
                 UpdateBaseTitle(title);
-                // cmd.exe sets the console title to the current directory
                 if (title.Length >= 3 && title[1] == ':' && char.IsLetter(title[0]) && Directory.Exists(title))
                 {
                     WorkingDirectory = title;
                 }
-
-                // Track Claude session name from title and detect /clear resets.
-                // _claudeReady gates all title tracking: Node.js sets process.title to the
-                // command line on startup (via ConPTY → OSC 2) before Claude sets "Claude Code".
-                // We ignore all titles until we first see "Claude Code".
-                if (HasRunningCommand &&
-                    string.Equals(RunningChildName, "claude", StringComparison.OrdinalIgnoreCase))
-                {
-                    var claudeTitleName = ExtractClaudeTitleName(title);
-                    if (claudeTitleName != null &&
-                        claudeTitleName.Equals("Claude Code", StringComparison.OrdinalIgnoreCase))
-                    {
-                        if (!_claudeReady)
-                        {
-                            // First startup — Claude just initialized
-                            _claudeReady = true;
-                            if (string.IsNullOrEmpty(ClaudeSessionName))
-                            {
-                                // Manual start — generate a name and rename
-                                var generated = GenerateClaudeName?.Invoke();
-                                if (!string.IsNullOrEmpty(generated))
-                                {
-                                    ClaudeSessionName = generated;
-                                    SendRenameAfterClear(generated);
-                                }
-                            }
-                            else
-                            {
-                                // Restored session with pre-set name — rename to it
-                                SendRenameAfterClear(ClaudeSessionName);
-                            }
-                        }
-                        else
-                        {
-                            // /clear detected — re-rename with stored name
-                            if (!string.IsNullOrEmpty(ClaudeSessionName))
-                            {
-                                SendRenameAfterClear(ClaudeSessionName);
-                            }
-                        }
-                    }
-                    else if (claudeTitleName != null && _claudeReady)
-                    {
-                        // Real title update (user or app renamed) — track it
-                        ClaudeSessionName = claudeTitleName;
-                    }
-                    // else: _claudeReady is false and title isn't "Claude Code" → startup noise, ignore
-                }
-                else if (_claudeReady)
-                {
-                    // Claude is no longer running — reset so next manual start gets a fresh rename
-                    _claudeReady = false;
-                }
+                HandleClaudeTitleChanged(title);
             });
         };
         _emulator.WorkingDirectoryChanged += path =>
@@ -350,98 +302,6 @@ public class TerminalSessionViewModel : ToolWindowViewModel
         }
     }
 
-    private async Task ReplayCommandAfterStartup(string command)
-    {
-        // Track the replayed command so it persists across save/restore cycles
-        LastCommand = command;
-        // Wait for the shell prompt to appear
-        await Task.Delay(500);
-        var data = InputEncoder.EncodeText(command + "\r");
-        WriteInput(data);
-
-        // If resuming a Claude session, --resume opens an interactive picker.
-        // Wait for the picker to render, then send Enter to auto-select the first match.
-        if (command.Contains("--resume", StringComparison.OrdinalIgnoreCase))
-        {
-            await WaitForResumePickerAndSelect();
-        }
-    }
-
-    private static string? ExtractClaudeTitleName(string title) =>
-        ClaudeTitleHelper.ExtractSessionName(title);
-
-    /// <summary>
-    /// Polls the screen buffer waiting for the Claude resume session picker to appear,
-    /// then sends Enter to auto-select the first (most recent) match.
-    /// </summary>
-    private async Task WaitForResumePickerAndSelect()
-    {
-        // Poll every 500ms for up to 15 seconds
-        for (int i = 0; i < 30; i++)
-        {
-            await Task.Delay(500);
-
-            // Check screen buffer for the resume picker's navigation hints
-            var rows = ScreenRows;
-            for (int row = 0; row < rows; row++)
-            {
-                var line = ReadScreenLine(row);
-                if (line.Contains("Esc to", StringComparison.Ordinal))
-                {
-                    // Picker is rendered — send Enter to select the first entry
-                    WriteInput(InputEncoder.EncodeText("\r"));
-                    return;
-                }
-            }
-        }
-    }
-
-    /// <summary>
-    /// Begins input suppression early (e.g. when /clear is typed),
-    /// before the title-change callback triggers SendRenameAfterClear.
-    /// Includes a safety timeout in case the rename sequence never fires.
-    /// </summary>
-    public void BeginInputSuppression()
-    {
-        _inputSuppressionCount++;
-
-        // Safety: auto-release if SendRenameAfterClear never fires
-        _ = Task.Delay(5000).ContinueWith(_ =>
-        {
-            if (_inputSuppressionCount > 0)
-            {
-                _inputSuppressionCount = 0;
-                FlushInputQueue();
-            }
-        }, TaskScheduler.FromCurrentSynchronizationContext());
-    }
-
-    private void SendRenameAfterClear(string sessionName)
-    {
-        _inputSuppressionCount++;
-        var scheduler = TaskScheduler.FromCurrentSynchronizationContext();
-
-        // Wait for Claude to finish processing /clear and show its prompt
-        Task.Delay(1500).ContinueWith(_ =>
-        {
-            // Re-verify Claude is still running and hasn't been manually renamed
-            if (!string.IsNullOrEmpty(ClaudeSessionName) &&
-                HasRunningCommand &&
-                string.Equals(RunningChildName, "claude", StringComparison.OrdinalIgnoreCase))
-            {
-                WriteInput(InputEncoder.EncodeText($"/rename {sessionName}\r"));
-            }
-
-            // Allow time for the rename command to be processed before releasing queued input
-            Task.Delay(500).ContinueWith(__ =>
-            {
-                // Reset all suppression (covers both our own and the early suppression from the view)
-                _inputSuppressionCount = 0;
-                FlushInputQueue();
-            }, scheduler);
-        }, scheduler);
-    }
-
     /// <summary>
     /// Sends raw bytes to the terminal process via a background writer queue.
     /// Returns immediately without blocking the UI thread.
@@ -450,26 +310,6 @@ public class TerminalSessionViewModel : ToolWindowViewModel
     {
         if (_conPty?.InputStream == null || !_conPty.IsRunning) return;
         _writeChannel.Writer.TryWrite(data);
-    }
-
-    /// <summary>
-    /// Sends user-originated input, queuing it if input is currently suppressed
-    /// (e.g. during the /clear → /rename sequence).
-    /// </summary>
-    public void WriteUserInput(byte[] data)
-    {
-        if (_inputSuppressionCount > 0)
-        {
-            _inputQueue.Enqueue(data);
-            return;
-        }
-        WriteInput(data);
-    }
-
-    private void FlushInputQueue()
-    {
-        while (_inputQueue.TryDequeue(out var data))
-            WriteInput(data);
     }
 
     private async Task WriteInputLoop(CancellationToken ct)
@@ -503,8 +343,8 @@ public class TerminalSessionViewModel : ToolWindowViewModel
         lock (_lock)
         {
             _emulator?.Resize(cols, rows);
+            _conPty?.Resize(cols, rows);
         }
-        _conPty?.Resize(cols, rows);
     }
 
     private async Task ReadOutputLoop(CancellationToken ct)
@@ -563,15 +403,26 @@ public class TerminalSessionViewModel : ToolWindowViewModel
 
                 // DEC 2026 synchronized output: the app has told us it's mid-update.
                 // Defer rendering until the reset sequence arrives (CSI ?2026l),
-                // or until the safety timeout expires to avoid a frozen screen.
+                // or until a data-arrival gap exceeds the timeout (app hung / lost
+                // sync-end sequence).  The timeout is measured from the last data
+                // arrival, not from when sync mode started — large TUI frames
+                // (e.g. Claude Code with multiple agents) can arrive in many chunks
+                // spread over >200ms total, and rendering mid-frame produces garbled
+                // text because the screen is only half-drawn.
                 bool synced = _emulator?.SynchronizedOutput ?? false;
                 if (synced)
                 {
-                    if (syncStartTime == default)
+                    if (syncStartTime != default
+                        && (DateTime.UtcNow - syncStartTime).TotalMilliseconds >= SyncTimeoutMs)
+                    {
+                        // Gap since last data exceeded timeout — fall through to render
+                        // so the screen isn't frozen indefinitely.
+                    }
+                    else
+                    {
                         syncStartTime = DateTime.UtcNow;
-
-                    if ((DateTime.UtcNow - syncStartTime).TotalMilliseconds < SyncTimeoutMs)
                         continue; // skip render, keep reading
+                    }
                 }
 
                 // Post-sync grace: Claude Code's Ink TUI emits cursor positioning
@@ -604,6 +455,12 @@ public class TerminalSessionViewModel : ToolWindowViewModel
                         syncStartTime = DateTime.UtcNow;
                         continue;
                     }
+
+                    // TUI stopped sending sync frames — restore normal scrollback.
+                    // This was deferred from the emulator's sync-ON handler to avoid
+                    // a brief window where stray LFs could leak old frame content
+                    // into the scrollback.
+                    lock (_lock) { _emulator?.RestoreScrollbackAfterSync(); }
                 }
                 syncStartTime = default;
 
@@ -625,46 +482,6 @@ public class TerminalSessionViewModel : ToolWindowViewModel
     }
 
     /// <summary>
-    /// Checks whether Claude Code has recently exited and runs artifact cleanup.
-    /// Uses a timed window (not one-shot) because ConPTY sends output in multiple
-    /// batches — a later batch can re-introduce artifacts after a single cleanup pass.
-    /// Throttled to avoid excessive ToolHelp32 snapshots.
-    /// </summary>
-    private void CheckForTuiExitCleanup()
-    {
-        var now = DateTime.UtcNow;
-        if (now - _lastChildCheckTime < TimeSpan.FromMilliseconds(300)) return;
-        _lastChildCheckTime = now;
-
-        var (childName, _) = _conPty?.GetChildProcessInfo() ?? (null, 0);
-        var prevName = _outputLoopChildName;
-        _outputLoopChildName = childName;
-
-        // Detect Claude exit → start cleanup window
-        if (string.Equals(prevName, "claude", StringComparison.OrdinalIgnoreCase) && childName == null)
-            _claudeExitTime = now;
-
-        // Run cleanup repeatedly during a 2-second window after Claude exits
-        if (!_claudeExitTime.HasValue) return;
-        if (now - _claudeExitTime.Value > TimeSpan.FromSeconds(2))
-        {
-            _claudeExitTime = null;
-            return;
-        }
-
-        lock (_lock)
-        {
-            RunClaudeArtifactCleanup();
-        }
-    }
-
-    private void RunClaudeArtifactCleanup()
-    {
-        if (_emulator?.Buffer == null) return;
-        TuiArtifactCleaner.CleanClaudeArtifacts(_emulator, _emulator.Buffer);
-    }
-
-    /// <summary>
     /// Snapshots the child process's current working directory before save/close.
     /// </summary>
     public void UpdateWorkingDirectoryFromProcess()
@@ -682,6 +499,7 @@ public class TerminalSessionViewModel : ToolWindowViewModel
         _readCts?.Cancel();
         _conPty?.Dispose();
         _conPty = null;
+        _emulator?.Dispose();
         _transcriptLogger?.Dispose();
         _transcriptLogger = null;
         UnregisterInstance();

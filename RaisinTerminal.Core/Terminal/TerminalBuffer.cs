@@ -21,9 +21,17 @@ public class TerminalBuffer
     public int MaxScrollback { get; set; } = 10_000;
 
     /// <summary>
-    /// Number of lines scrolled back from bottom (0 = live/at bottom).
+    /// Viewports currently rendering this buffer. Used by ScrollUpRegion to
+    /// keep each scrolled-back viewport stable as new lines arrive.
     /// </summary>
-    public int ScrollOffset { get; set; }
+    public List<TerminalViewport> Viewports { get; } = new();
+
+    /// <summary>
+    /// Fired after a line is committed to scrollback (top==0 scroll, not in alt-screen).
+    /// The argument is the snapshotted row added to scrollback. Used by the transcript
+    /// logger to record screen-accurate text as rows scroll out of view.
+    /// </summary>
+    public event Action<CellData[]>? ScrollbackLineAdded;
 
     /// <summary>
     /// Monotonically increasing count of lines scrolled into scrollback.
@@ -36,6 +44,31 @@ public class TerminalBuffer
     /// Set during alternate screen mode.
     /// </summary>
     public bool SuppressScrollback { get; set; }
+
+    /// <summary>
+    /// When true AND <see cref="SuppressScrollback"/> is also true, scrolled-off rows
+    /// are saved to a deferred list instead of being discarded. The emulator calls
+    /// <see cref="ClearDeferredScrollback"/> at each TUI frame start (so only the
+    /// latest frame's overflow survives) and <see cref="FlushDeferredScrollback"/>
+    /// when output goes idle, committing the rows to real scrollback.
+    /// </summary>
+    public bool DeferScrollbackOnSuppress
+    {
+        get => _deferScrollbackOnSuppress;
+        set
+        {
+            _deferScrollbackOnSuppress = value;
+            if (value)
+                _scrollbackCountAtDeferStart = _scrollback.Count;
+        }
+    }
+    private bool _deferScrollbackOnSuppress;
+    private int _scrollbackCountAtDeferStart;
+    private List<CellData[]> _deferredScrollback = new();
+    private List<bool> _deferredScrollbackWrapped = new();
+
+    // Tracks rows pushed to scrollback by resize shrinks, so grow can pull them back.
+    private int _resizePushCount;
 
     // Scrolling region (DECSTBM)
     public int ScrollTop { get; set; }
@@ -58,17 +91,24 @@ public class TerminalBuffer
 
     /// <summary>
     /// Returns the cell visible at a given viewport row/col, accounting for scroll offset.
-    /// When ScrollOffset == 0, returns the live screen cell. When scrolled back,
-    /// maps viewport rows to scrollback or screen buffer lines.
+    /// Equivalent to <see cref="GetVisibleCell(int, int, int, int)"/> with viewRows = Rows.
     /// </summary>
-    public CellData GetVisibleCell(int viewRow, int viewCol)
-    {
-        if (ScrollOffset == 0)
-            return _screen[viewRow, viewCol];
+    public CellData GetVisibleCell(int viewRow, int viewCol, int scrollOffset)
+        => GetVisibleCell(viewRow, viewCol, scrollOffset, Rows);
 
+    /// <summary>
+    /// Returns the cell at (viewRow, viewCol) for a viewport of <paramref name="viewRows"/>
+    /// rows anchored to the bottom of the live screen at scrollOffset = 0. As scrollOffset
+    /// increases, the view shifts up by that many lines into scrollback. When viewRows
+    /// equals <see cref="Rows"/>, this matches the historical "view spans the live screen"
+    /// behavior. When viewRows &lt; Rows (e.g. a smaller pinned canvas above a larger live
+    /// pane), the view stays anchored to the live screen's bottom row at offset 0 instead
+    /// of the top.
+    /// </summary>
+    public CellData GetVisibleCell(int viewRow, int viewCol, int scrollOffset, int viewRows)
+    {
         int totalLines = _scrollback.Count + Rows;
-        int viewStart = totalLines - ScrollOffset - Rows;
-        int lineIndex = viewStart + viewRow;
+        int lineIndex = totalLines - viewRows - scrollOffset + viewRow;
 
         if (lineIndex < 0)
             return CellData.Empty;
@@ -83,7 +123,39 @@ public class TerminalBuffer
         return screenRow < Rows && viewCol < Columns ? _screen[screenRow, viewCol] : CellData.Empty;
     }
 
-    public void SetCell(int row, int col, CellData cell) => _screen[row, col] = cell;
+    /// <summary>
+    /// Returns the cell at the given absolute row index (the same coordinate system used
+    /// by selection and search). Returns Empty if the row has been evicted from scrollback
+    /// or is past the live screen's bottom.
+    /// </summary>
+    public CellData GetCellAtAbsoluteRow(long absRow, int col)
+    {
+        long lineIndex = absRow - (TotalLinesScrolled - _scrollback.Count);
+        if (lineIndex < 0 || lineIndex >= _scrollback.Count + Rows)
+            return CellData.Empty;
+
+        if (lineIndex < _scrollback.Count)
+        {
+            var line = _scrollback[(int)lineIndex];
+            return col < line.Length ? line[col] : CellData.Empty;
+        }
+
+        int screenRow = (int)(lineIndex - _scrollback.Count);
+        return col < Columns ? _screen[screenRow, col] : CellData.Empty;
+    }
+
+    /// <summary>
+    /// Monotonically increasing counter incremented on every cell write. Used by
+    /// the transcript logger to detect whether the visible screen has changed
+    /// since the last snapshot, so idle flushes can skip identical states.
+    /// </summary>
+    public long ModificationCount { get; private set; }
+
+    public void SetCell(int row, int col, CellData cell)
+    {
+        _screen[row, col] = cell;
+        ModificationCount++;
+    }
 
     /// <summary>
     /// Marks a screen row as a soft-wrapped continuation of the previous row.
@@ -145,33 +217,205 @@ public class TerminalBuffer
     /// <summary>
     /// Drops all saved scrollback lines. Used to implement ED 3 (ESC[3J),
     /// which xterm defines as "erase saved lines". The visible screen is not
-    /// touched.
+    /// touched. Viewports are reset to live since their scroll positions
+    /// reference content that no longer exists.
     /// </summary>
     public void ClearScrollback()
     {
         _scrollback.Clear();
         _scrollbackWrapped.Clear();
-        ScrollOffset = 0;
+        _deferredScrollback.Clear();
+        _deferredScrollbackWrapped.Clear();
+        _resizePushCount = 0;
+        foreach (var vp in Viewports)
+        {
+            vp.ScrollOffset = 0;
+            vp.UserScrolledBack = false;
+        }
+    }
+
+    /// <summary>
+    /// Discards all deferred scrollback rows. Called at TUI frame start so that
+    /// only the latest frame's overflow survives — prevents duplicates across
+    /// successive redraws.
+    /// </summary>
+    public void ClearDeferredScrollback()
+    {
+        _deferredScrollback.Clear();
+        _deferredScrollbackWrapped.Clear();
+    }
+
+    /// <summary>
+    /// Commits deferred scrollback rows to the real scrollback buffer. Called when
+    /// TUI output goes idle or Claude exits, so overflow from the last frame is
+    /// preserved rather than lost.
+    /// </summary>
+    public void FlushDeferredScrollback()
+    {
+        if (_deferredScrollback.Count == 0) return;
+
+        // Skip leading deferred rows that already exist at the tail of real
+        // scrollback (identical TUI redraws produce the same overflow). Uses
+        // content comparison so streaming output between frames doesn't cause
+        // non-duplicate rows to be incorrectly skipped.
+        int alreadyCommitted = _scrollback.Count - _scrollbackCountAtDeferStart;
+        int skip = 0;
+        int maxSkip = Math.Clamp(alreadyCommitted, 0, _deferredScrollback.Count);
+        for (int i = 0; i < maxSkip; i++)
+        {
+            if (RowsEqual(_scrollback[_scrollbackCountAtDeferStart + i],
+                          _deferredScrollback[i]))
+                skip++;
+            else
+                break;
+        }
+
+        for (int i = skip; i < _deferredScrollback.Count; i++)
+        {
+            var row = _deferredScrollback[i];
+            bool evicted = _scrollback.Add(row);
+            _scrollbackWrapped.Add(_deferredScrollbackWrapped[i]);
+            TotalLinesScrolled++;
+            ScrollbackLineAdded?.Invoke(row);
+
+            foreach (var vp in Viewports)
+            {
+                if (vp.ScrollOffset > 0)
+                {
+                    vp.ScrollOffset++;
+                    if (evicted)
+                        vp.ScrollOffset--;
+                }
+            }
+        }
+        _deferredScrollback.Clear();
+        _deferredScrollbackWrapped.Clear();
     }
 
     public void Resize(int cols, int rows)
     {
+        if (cols == Columns && rows == Rows) return;
+
+        // SHRINK: shift content so cursor stays on-screen.
+        // Always compute the shift so our buffer matches ConPTY's layout;
+        // only commit rows to scrollback when not suppressed.
+        int pushCount = 0;
+        if (rows < Rows && CursorRow >= rows)
+        {
+            pushCount = CursorRow - rows + 1;
+            if (!SuppressScrollback)
+            {
+                for (int r = 0; r < pushCount; r++)
+                {
+                    var row = new CellData[Columns];
+                    for (int c = 0; c < Columns; c++)
+                        row[c] = _screen[r, c];
+                    _scrollback.Add(row);
+                    _scrollbackWrapped.Add(_screenWrapped[r]);
+                    TotalLinesScrolled++;
+                }
+                _resizePushCount += pushCount;
+
+                foreach (var vp in Viewports)
+                {
+                    if (vp.ScrollOffset > 0)
+                    {
+                        int c = vp.CanvasRows;
+                        if (c > 0 && c < Rows)
+                        {
+                            int vOld = Math.Min(Rows, c);
+                            int vNew = Math.Min(rows, c);
+                            vp.ScrollOffset += vOld - vNew;
+                        }
+                        else
+                        {
+                            vp.ScrollOffset += pushCount;
+                        }
+                    }
+                }
+            }
+            CursorRow -= pushCount;
+        }
+
+        // GROW: pull rows from scrollback to match ConPTY's behavior
+        int pullCount = 0;
+        if (rows > Rows && !SuppressScrollback && _resizePushCount > 0)
+        {
+            int extraRows = rows - Rows;
+            pullCount = Math.Min(extraRows, Math.Min(_resizePushCount, _scrollback.Count));
+        }
+
         var newScreen = new CellData[rows, cols];
+        for (int r = 0; r < rows; r++)
+            for (int c = 0; c < cols; c++)
+                newScreen[r, c] = CellData.Empty;
+
         var newWrapped = new bool[rows];
-        int copyRows = Math.Min(rows, Rows);
         int copyCols = Math.Min(cols, Columns);
+
+        // Place pulled scrollback rows at top of new screen
+        for (int r = 0; r < pullCount; r++)
+        {
+            int sbIdx = _scrollback.Count - pullCount + r;
+            var line = _scrollback[sbIdx];
+            newWrapped[r] = _scrollbackWrapped[sbIdx];
+            for (int c = 0; c < Math.Min(cols, line.Length); c++)
+                newScreen[r, c] = line[c];
+        }
+
+        // Copy old screen content after pulled rows
+        int copyRows = Math.Min(rows - pullCount, Rows - pushCount);
         for (int r = 0; r < copyRows; r++)
         {
-            newWrapped[r] = _screenWrapped[r];
+            newWrapped[pullCount + r] = _screenWrapped[r + pushCount];
             for (int c = 0; c < copyCols; c++)
-                newScreen[r, c] = _screen[r, c];
+                newScreen[pullCount + r, c] = _screen[r + pushCount, c];
         }
+
+        // Remove pulled rows from scrollback
+        if (pullCount > 0)
+        {
+            _scrollback.RemoveNewest(pullCount);
+            _scrollbackWrapped.RemoveNewest(pullCount);
+            TotalLinesScrolled -= pullCount;
+            _resizePushCount -= pullCount;
+            CursorRow += pullCount;
+
+            foreach (var vp in Viewports)
+            {
+                if (vp.ScrollOffset > 0)
+                {
+                    int c = vp.CanvasRows;
+                    if (c > 0 && c < rows)
+                    {
+                        int vOld = Math.Min(Rows, c);
+                        int vNew = Math.Min(rows, c);
+                        vp.ScrollOffset = Math.Max(0, vp.ScrollOffset + vOld - vNew);
+                    }
+                    else
+                    {
+                        vp.ScrollOffset = Math.Max(0, vp.ScrollOffset - pullCount);
+                    }
+                }
+            }
+        }
+
         _screen = newScreen;
         _screenWrapped = newWrapped;
+        int oldRows = Rows;
         Columns = cols;
         Rows = rows;
-        ScrollTop = 0;
-        ScrollBottom = rows - 1;
+
+        if (ScrollTop >= rows || ScrollBottom >= rows)
+        {
+            ScrollTop = 0;
+            ScrollBottom = rows - 1;
+        }
+        else if (ScrollBottom == oldRows - 1)
+        {
+            ScrollBottom = rows - 1;
+        }
+
         CursorRow = Math.Min(CursorRow, rows - 1);
         CursorCol = Math.Min(CursorCol, cols - 1);
     }
@@ -192,15 +436,26 @@ public class TerminalBuffer
             bool evicted = _scrollback.Add(row);
             _scrollbackWrapped.Add(_screenWrapped[0]);
             TotalLinesScrolled++;
+            ScrollbackLineAdded?.Invoke(row);
 
-            // Keep viewport stable when user is scrolled back
-            if (ScrollOffset > 0)
+            // Keep each scrolled-back viewport stable as new lines arrive.
+            foreach (var vp in Viewports)
             {
-                ScrollOffset++;
-                // If an old line was evicted, adjust back down
-                if (evicted)
-                    ScrollOffset--;
+                if (vp.ScrollOffset > 0)
+                {
+                    vp.ScrollOffset++;
+                    if (evicted)
+                        vp.ScrollOffset--;
+                }
             }
+        }
+        else if (top == 0 && SuppressScrollback && DeferScrollbackOnSuppress)
+        {
+            var row = new CellData[Columns];
+            for (int c = 0; c < Columns; c++)
+                row[c] = _screen[0, c];
+            _deferredScrollback.Add(row);
+            _deferredScrollbackWrapped.Add(_screenWrapped[0]);
         }
 
         // Shift rows up within region
@@ -253,6 +508,15 @@ public class TerminalBuffer
         ScrollDownRegion(0, Rows - 1, CellData.Empty);
     }
 
+    private static bool RowsEqual(CellData[] a, CellData[] b)
+    {
+        if (a.Length != b.Length) return false;
+        for (int i = 0; i < a.Length; i++)
+            if (a[i].Character != b[i].Character)
+                return false;
+        return true;
+    }
+
     public CellData[] GetScrollbackLine(int index) => _scrollback[index];
 
     /// <summary>
@@ -278,11 +542,4 @@ public class TerminalBuffer
         return sb.ToString();
     }
 
-    /// <summary>
-    /// Clamps ScrollOffset to valid range based on current scrollback size.
-    /// </summary>
-    public void ClampScrollOffset()
-    {
-        ScrollOffset = Math.Clamp(ScrollOffset, 0, _scrollback.Count);
-    }
 }

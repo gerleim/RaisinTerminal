@@ -1,9 +1,12 @@
 using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls.Primitives;
+using System.Windows.Input;
+using System.Windows.Interop;
 using AvalonDock.Themes;
 using Raisin.WPF.Base;
 using RaisinTerminal.Services;
+using RaisinTerminal.Settings;
 using RaisinTerminal.ViewModels;
 using RaisinTerminal.Views;
 
@@ -23,15 +26,38 @@ public partial class MainWindow : Window
         _viewModel.ProjectsPanel.PropertyChanged += ProjectsPanel_PropertyChanged;
     }
 
+    public static bool IsUserResizing { get; private set; }
+    public static event Action? WindowResizeCompleted;
+
     protected override void OnSourceInitialized(EventArgs e)
     {
         base.OnSourceInitialized(e);
         DarkWindowHelper.Apply(this);
         DockingManager.Theme = new Vs2013DarkTheme();
 
+        var hwndSource = PresentationSource.FromVisual(this) as HwndSource;
+        hwndSource?.AddHook(WndProc);
+
         _restoredState = LayoutService.LoadState();
         if (_restoredState is not null)
             LayoutService.RestoreWindowPlacement(this, _restoredState);
+    }
+
+    private static IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        const int WM_ENTERSIZEMOVE = 0x0231;
+        const int WM_EXITSIZEMOVE = 0x0232;
+
+        if (msg == WM_ENTERSIZEMOVE)
+        {
+            IsUserResizing = true;
+        }
+        else if (msg == WM_EXITSIZEMOVE)
+        {
+            IsUserResizing = false;
+            WindowResizeCompleted?.Invoke();
+        }
+        return IntPtr.Zero;
     }
 
     protected override void OnContentRendered(EventArgs e)
@@ -62,6 +88,40 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>
+    /// Window-level dispatcher for user-rebindable commands. Resolves the chord
+    /// against the Window scope of <see cref="KeyBindingsService"/> and invokes the
+    /// matching ViewModel command. Handlers run in the tunneling phase so they fire
+    /// regardless of which control currently has focus.
+    /// </summary>
+    protected override void OnPreviewKeyDown(KeyEventArgs e)
+    {
+        base.OnPreviewKeyDown(e);
+        if (e.Handled) return;
+
+        var key = e.Key == Key.System ? e.SystemKey
+                : e.Key == Key.ImeProcessed ? e.ImeProcessedKey
+                : e.Key;
+
+        var commandId = KeyBindingsService.TryResolve(key, Keyboard.Modifiers, KeyBindingScope.Window);
+        if (commandId == null) return;
+
+        ICommand? command = commandId switch
+        {
+            KeyBindingIds.NewSession => _viewModel.NewSessionCommand,
+            KeyBindingIds.NewClaudeSession => _viewModel.NewClaudeSessionCommand,
+            KeyBindingIds.ToggleSplitView => _viewModel.ToggleSplitViewCommand,
+            KeyBindingIds.ClearScrollback => _viewModel.ClearScrollbackCommand,
+            _ => null,
+        };
+
+        if (command != null && command.CanExecute(null))
+        {
+            command.Execute(null);
+            e.Handled = true;
+        }
+    }
+
     protected override void OnActivated(EventArgs e)
     {
         base.OnActivated(e);
@@ -80,6 +140,8 @@ public partial class MainWindow : Window
         _viewModel.ProjectsPanel.StopTimer();
         _viewModel.Dispose();
         LayoutService.SaveLayout(DockingManager, _viewModel, this);
+        SettingsService.Save(SettingsService.Current);
+        SessionDimensionsService.Save(_viewModel.Documents.Select(d => d.ContentId));
         base.OnClosing(e);
     }
 

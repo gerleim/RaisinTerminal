@@ -300,9 +300,10 @@ public static class ClaudeScreenStateClassifier
                 && scan.IdlePromptRow - scan.Option2Row is >= 0 and <= 10;
         }
 
-        // No idle prompt (Ink TUI screens like plan mode) — just verify
-        // the options are close to each other (not scattered in output)
-        return Math.Abs(scan.Option1Row - scan.Option2Row) <= 5;
+        // No idle prompt (Ink TUI screens like plan mode) — options must be
+        // close to each other AND near the cursor (not stale selections scrolled above)
+        return Math.Abs(scan.Option1Row - scan.Option2Row) <= 5
+            && Math.Abs(cursorRow - scan.Option2Row) <= 10;
     }
 
     /// <summary>

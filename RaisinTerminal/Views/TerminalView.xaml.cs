@@ -5,8 +5,10 @@ using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
 using Raisin.EventSystem;
+using RaisinTerminal.Controls;
 using RaisinTerminal.Core.Terminal;
 using RaisinTerminal.Services;
+using RaisinTerminal.Settings;
 using RaisinTerminal.ViewModels;
 
 namespace RaisinTerminal.Views;
@@ -15,14 +17,11 @@ public partial class TerminalView : UserControl
 {
     private TerminalSessionViewModel? _vm;
     private DispatcherTimer? _cursorTimer;
-    private bool _selecting;
-    private bool _userScrolledBack;
+    private readonly InputLineEditor _inputEditor = new();
+    private readonly TerminalViewport _viewport = new() { IsLive = true };
+    private int _savedScrollOffsetBeforeAltScreen;
     private DateTime _lastUndoRedoTime;
-    private bool _overlayActive;
-    private bool _lastAlternateScreen;
-    private bool _searchActive;
-    private readonly TerminalSearchState _searchState = new();
-    private DispatcherTimer? _searchDebounceTimer;
+    private bool _resizePendingFromDrag;
 
     public TerminalView()
     {
@@ -33,8 +32,8 @@ public partial class TerminalView : UserControl
         VerticalScrollBar.Scroll += OnScrollBarScroll;
         Drop += OnFileDrop;
         DragOver += OnDragOver;
-        SearchInput.PreviewKeyDown += OnSearchInputKeyDown;
-        SearchInput.TextChanged += OnSearchTextChanged;
+        InitSearch();
+        InitSplitView();
     }
 
     private void OnLoaded(object sender, RoutedEventArgs e)
@@ -43,8 +42,16 @@ public partial class TerminalView : UserControl
         if (_vm == null) return;
 
         Canvas.Emulator = _vm.Emulator;
+        Canvas.Viewport = _viewport;
         Canvas.CompressEmptyLines = SettingsService.Current.CompressEmptyLines;
+        PinnedCanvas.Emulator = _vm.Emulator;
+        PinnedCanvas.Viewport = _pinnedViewport;
+        PinnedCanvas.CompressEmptyLines = SettingsService.Current.CompressEmptyLines;
+        _inputEditor.Attach(_vm, Canvas);
         _vm.RenderRequested += OnRenderRequested;
+        _vm.SplitToggleRequested += ToggleSplit;
+
+        RegisterViewportAndAltScreenHooks();
 
         // Start cursor blink timer
         _cursorTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(530) };
@@ -60,23 +67,73 @@ public partial class TerminalView : UserControl
         {
             _vm.StartSession(Canvas.Columns, Canvas.Rows);
             Canvas.Emulator = _vm.Emulator;
+            RegisterViewportAndAltScreenHooks();
         }
 
         // Defer focus to avoid NullReferenceException when HWND isn't ready yet
         Dispatcher.BeginInvoke(() => Canvas.Focus(), System.Windows.Threading.DispatcherPriority.Input);
     }
 
+    /// <summary>
+    /// Registers this view's viewport with the buffer and hooks alt-screen
+    /// save/restore. Idempotent so OnLoaded and the deferred StartSession path
+    /// can both call it safely.
+    /// </summary>
+    private void RegisterViewportAndAltScreenHooks()
+    {
+        var emulator = _vm?.Emulator;
+        if (emulator == null) return;
+
+        var buffer = emulator.Buffer;
+        if (!buffer.Viewports.Contains(_viewport))
+            buffer.Viewports.Add(_viewport);
+
+        // Only subscribe once
+        emulator.AlternateScreenEntered -= OnAlternateScreenEntered;
+        emulator.AlternateScreenExited -= OnAlternateScreenExited;
+        emulator.AlternateScreenEntered += OnAlternateScreenEntered;
+        emulator.AlternateScreenExited += OnAlternateScreenExited;
+    }
+
+    private void OnAlternateScreenEntered()
+    {
+        _savedScrollOffsetBeforeAltScreen = _viewport.ScrollOffset;
+        _viewport.ScrollOffset = 0;
+        _viewport.UserScrolledBack = false;
+    }
+
+    private void OnAlternateScreenExited()
+    {
+        _viewport.ScrollOffset = _savedScrollOffsetBeforeAltScreen;
+        _viewport.UserScrolledBack = _viewport.ScrollOffset > 0;
+    }
+
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
         if (_vm != null)
+        {
             _vm.RenderRequested -= OnRenderRequested;
+            _vm.SplitToggleRequested -= ToggleSplit;
+            var emulator = _vm.Emulator;
+            if (emulator != null)
+            {
+                emulator.AlternateScreenEntered -= OnAlternateScreenEntered;
+                emulator.AlternateScreenExited -= OnAlternateScreenExited;
+                emulator.Buffer.Viewports.Remove(_viewport);
+                emulator.Buffer.Viewports.Remove(_pinnedViewport);
+            }
+        }
+        _inputEditor.Detach();
         _cursorTimer?.Stop();
+        if (_resizePendingFromDrag)
+            MainWindow.WindowResizeCompleted -= OnWindowResizeCompleted;
     }
 
     private void OnRenderRequested()
     {
         // Pick up any settings changes (e.g. after Options dialog)
         Canvas.CompressEmptyLines = SettingsService.Current.CompressEmptyLines;
+        PinnedCanvas.CompressEmptyLines = SettingsService.Current.CompressEmptyLines;
         // Reset cursor to visible on new output
         Canvas.CursorVisible = true;
         _cursorTimer?.Stop();
@@ -85,11 +142,16 @@ public partial class TerminalView : UserControl
         // Auto-scroll to bottom on new output unless the user explicitly scrolled back.
         // ScrollOffset may be > 0 from ScrollUpRegion auto-incrementing while the tab
         // was inactive — that's not user-initiated, so we should snap back to live.
-        if (!_userScrolledBack)
+        if (_viewport.IsLive && !_viewport.UserScrolledBack)
             ScrollToBottom();
 
         UpdateScrollBar();
         Canvas.Invalidate();
+        if (_isSplit)
+        {
+            UpdatePinnedScrollBar();
+            PinnedCanvas.Invalidate();
+        }
 
         // Refresh search matches if search is active (buffer content changed)
         if (_searchActive && !string.IsNullOrEmpty(SearchInput.Text))
@@ -113,10 +175,23 @@ public partial class TerminalView : UserControl
         int rows = Canvas.Rows;
         if (cols <= 0 || rows <= 0) return;
 
+        SessionDimensionsService.Set(_vm.ContentId, cols, rows);
+        SettingsService.Current.LastCanvasColumns = cols;
+        SettingsService.Current.LastCanvasRows = rows;
+
         if (!_vm.IsConnected)
         {
             _vm.StartSession(cols, rows);
             Canvas.Emulator = _vm.Emulator;
+            RegisterViewportAndAltScreenHooks();
+        }
+        else if (MainWindow.IsUserResizing)
+        {
+            if (!_resizePendingFromDrag)
+            {
+                _resizePendingFromDrag = true;
+                MainWindow.WindowResizeCompleted += OnWindowResizeCompleted;
+            }
         }
         else
         {
@@ -124,26 +199,51 @@ public partial class TerminalView : UserControl
         }
     }
 
+    private void OnWindowResizeCompleted()
+    {
+        MainWindow.WindowResizeCompleted -= OnWindowResizeCompleted;
+        _resizePendingFromDrag = false;
+        if (_vm == null) return;
+        int cols = Canvas.Columns;
+        int rows = Canvas.Rows;
+        if (cols > 0 && rows > 0)
+            _vm.Resize(cols, rows);
+    }
+
     // ─── Keyboard Input ──────────────────────────────────────────────────
 
     protected override void OnPreviewKeyDown(KeyEventArgs e)
     {
+        if (e.Handled) return;
         if (_vm == null || !_vm.IsConnected) return;
 
-        // Ctrl+F → toggle search bar (works in any mode)
-        if ((Keyboard.Modifiers & ModifierKeys.Control) != 0 && e.Key == Key.F)
+        // User-rebindable commands. Checked before built-in shortcuts so users
+        // can remap them without colliding with the defaults below.
+        // When an IME consumes the key, e.Key is reported as ImeProcessed and the
+        // real key surfaces on e.ImeProcessedKey.
+        var pressedKey = e.Key == Key.ImeProcessed ? e.ImeProcessedKey : e.Key;
+        var commandId = KeyBindingsService.TryResolve(pressedKey, Keyboard.Modifiers, KeyBindingScope.Terminal);
+
+        // When search bar is active, only handle search-specific commands
+        // (toggle, scroll); let the TextBox handle paste/undo/copy natively.
+        if (_searchActive)
         {
-            if (_searchActive)
+            if (commandId == KeyBindingIds.ToggleSearch)
+            {
                 CloseSearch();
-            else
-                OpenSearch();
-            e.Handled = true;
+                e.Handled = true;
+            }
             return;
         }
 
-        // When search bar is active, let the SearchInput TextBox handle keys
-        if (_searchActive)
-            return;
+        if (commandId != null)
+        {
+            if (DispatchBoundCommand(commandId))
+            {
+                e.Handled = true;
+                return;
+            }
+        }
 
         // When overlay is active, route keys to the overlay handler
         if (_overlayActive)
@@ -160,101 +260,6 @@ public partial class TerminalView : UserControl
         // Let these fall through to OnPreviewTextInput for proper text composition.
         if (ctrl && alt)
             return;
-
-        // Ctrl+Z → undo input
-        if (ctrl && !shift && e.Key == Key.Z)
-        {
-            var now = DateTime.UtcNow;
-            if (e.IsRepeat || (now - _lastUndoRedoTime).TotalMilliseconds < 150)
-            {
-                e.Handled = true;
-                return;
-            }
-            _lastUndoRedoTime = now;
-
-            var target = _vm.InputUndo.Undo();
-            if (target != null)
-                ApplyUndoRedo(target);
-            e.Handled = true;
-            return;
-        }
-
-        // Ctrl+Y or Ctrl+Shift+Z → redo input
-        if ((ctrl && !shift && e.Key == Key.Y) || (ctrl && shift && e.Key == Key.Z))
-        {
-            var now = DateTime.UtcNow;
-            if (e.IsRepeat || (now - _lastUndoRedoTime).TotalMilliseconds < 150)
-            {
-                e.Handled = true;
-                return;
-            }
-            _lastUndoRedoTime = now;
-
-            var target = _vm.InputUndo.Redo();
-            if (target != null)
-                ApplyUndoRedo(target);
-            e.Handled = true;
-            return;
-        }
-
-        // Ctrl+C with selection → copy to clipboard
-        if (ctrl && e.Key == Key.C && Canvas.SelectionStart != null)
-        {
-            var text = Canvas.GetSelectedText();
-            if (!string.IsNullOrEmpty(text))
-            {
-                Clipboard.SetText(text);
-                ClearSelection();
-                Canvas.Invalidate();
-            }
-            e.Handled = true;
-            return;
-        }
-
-        // Ctrl+V → paste from clipboard (image or text)
-        if (ctrl && e.Key == Key.V)
-        {
-            if (Clipboard.ContainsImage())
-            {
-                var image = Clipboard.GetImage();
-                if (image != null)
-                {
-                    var path = _vm.PasteImage?.Invoke(image);
-                    if (path != null)
-                        PasteText(path);
-                }
-            }
-            else if (Clipboard.ContainsText())
-            {
-                PasteText(Clipboard.GetText());
-            }
-            e.Handled = true;
-            return;
-        }
-
-        // Ctrl+A → select current input line
-        if (ctrl && e.Key == Key.A && !(_vm.Emulator?.AlternateScreen ?? false))
-        {
-            var inputLen = _vm.CurrentInputLine.Length;
-            var buffer = _vm.Emulator?.Buffer;
-            if (inputLen > 0 && buffer != null)
-            {
-                int row = buffer.CursorRow;
-                int endCol = buffer.Columns - 1;
-                while (endCol >= 0 && buffer.GetCell(row, endCol).Character == ' ')
-                    endCol--;
-                if (endCol >= 0)
-                {
-                    int startCol = Math.Max(0, endCol - inputLen + 1);
-                    long absRow = buffer.TotalLinesScrolled + row;
-                    Canvas.SelectionStart = (absRow, startCol);
-                    Canvas.SelectionEnd = (absRow, endCol);
-                    Canvas.Invalidate();
-                }
-            }
-            e.Handled = true;
-            return;
-        }
 
         // Shift+Enter or Ctrl+Enter → insert newline instead of submitting
         if (e.Key == Key.Enter && (shift || ctrl))
@@ -291,6 +296,12 @@ public partial class TerminalView : UserControl
                 _vm.WriteTranscriptMarker("Session cleared (/clear)");
                 _vm.WriteUserInput(InputEncoder.EncodeKey(ConsoleKey.Enter));
                 _vm.BeginInputSuppression();
+                // Wipe pre-existing scrollback and pre-arm suppression so the
+                // newlines Claude emits before its ED 2 don't leak the prior
+                // banner into history. The idle-tick path releases suppression
+                // once Claude's redraw goes quiet.
+                _vm.ClearScrollback();
+                _vm.Emulator?.BeginScrollbackSuppressionForRedraw();
                 e.Handled = true;
                 return;
             }
@@ -299,6 +310,12 @@ public partial class TerminalView : UserControl
         // Track Backspace for current input line
         if (e.Key == Key.Back)
         {
+            if (_inputEditor.HasSelection && _inputEditor.DeleteSelection())
+            {
+                ScrollToBottom();
+                e.Handled = true;
+                return;
+            }
             if (_vm.CurrentInputLine.Length > 0)
             {
                 _vm.CurrentInputLine.Length--;
@@ -306,33 +323,33 @@ public partial class TerminalView : UserControl
             }
         }
 
+        // Track Delete key for selection-delete
+        if (e.Key == Key.Delete)
+        {
+            if (_inputEditor.HasSelection && _inputEditor.DeleteSelection())
+            {
+                ScrollToBottom();
+                e.Handled = true;
+                return;
+            }
+        }
+
         // Track Ctrl+C (no selection) and Escape → reset current input
-        if (e.Key == Key.Escape || (ctrl && e.Key == Key.C && Canvas.SelectionStart == null))
+        if (e.Key == Key.Escape || (ctrl && e.Key == Key.C && !_inputEditor.HasSelection))
         {
             _vm.CurrentInputLine.Clear();
             _vm.InputUndo.Clear();
             CommandHistoryService.Instance.ResetNavigation();
         }
 
-        // Up/Down arrow keys are passed through to the child process,
-        // which handles its own history navigation (readline, Claude CLI, etc.).
-
-        // Shift+PageUp/PageDown for scrollback navigation
-        if (shift && (e.Key == Key.PageUp || e.Key == Key.PageDown))
+        // Shift+Arrow / Ctrl+Shift+Arrow / Shift+Home / Shift+End → keyboard selection
+        if (shift && !alt && (pressedKey == Key.Left || pressedKey == Key.Right || pressedKey == Key.Home || pressedKey == Key.End))
         {
-            var buf = _vm.Emulator?.Buffer;
-            if (buf != null && !(_vm.Emulator?.AlternateScreen ?? false))
+            if (_inputEditor.HandleShiftArrow(pressedKey, ctrl))
             {
-                int pageSize = Math.Max(1, Canvas.Rows - 1);
-                buf.ScrollOffset = e.Key == Key.PageUp
-                    ? Math.Min(buf.ScrollOffset + pageSize, buf.ScrollbackCount)
-                    : Math.Max(buf.ScrollOffset - pageSize, 0);
-                _userScrolledBack = buf.ScrollOffset > 0;
-                UpdateScrollBar();
-                Canvas.Invalidate();
+                e.Handled = true;
+                return;
             }
-            e.Handled = true;
-            return;
         }
 
         // Map WPF Key to ConsoleKey and send
@@ -342,7 +359,7 @@ public partial class TerminalView : UserControl
             var data = InputEncoder.EncodeKey(consoleKey.Value, ctrl, shift: shift);
             if (data.Length > 0)
             {
-                ClearSelection();
+                _inputEditor.ClearSelection();
                 ScrollToBottom();
                 _vm.WriteUserInput(data);
                 e.Handled = true;
@@ -354,6 +371,128 @@ public partial class TerminalView : UserControl
         // let them propagate to OnPreviewTextInput for text entry.
     }
 
+    /// <summary>
+    /// Executes a user-rebindable command resolved by KeyBindingsService.
+    /// Returns true if the command was handled (caller should mark e.Handled).
+    /// Returning false lets the keystroke fall through to default handling — used
+    /// for commands that only apply in a specific mode (e.g. copy-selection only
+    /// when there is a selection, select-input-line only at the shell prompt).
+    /// </summary>
+    private bool DispatchBoundCommand(string commandId)
+    {
+        if (_vm == null) return false;
+
+        switch (commandId)
+        {
+            case KeyBindingIds.ToggleSearch:
+                if (_searchActive) CloseSearch(); else OpenSearch();
+                return true;
+
+            case KeyBindingIds.ScrollPageUp:
+            case KeyBindingIds.ScrollPageDown:
+                return TryScrollPage(commandId == KeyBindingIds.ScrollPageUp);
+
+            case KeyBindingIds.UndoInput:
+                return TryUndoRedo(redo: false);
+
+            case KeyBindingIds.RedoInput:
+                return TryUndoRedo(redo: true);
+
+            case KeyBindingIds.CopySelection:
+                return TryCopySelection();
+
+            case KeyBindingIds.Paste:
+                PasteFromClipboard();
+                return true;
+
+            case KeyBindingIds.SelectInputLine:
+                return _inputEditor.SelectAll();
+
+            default:
+                return false;
+        }
+    }
+
+    private bool TryScrollPage(bool up)
+    {
+        var buf = _vm?.Emulator?.Buffer;
+        if (buf == null || (_vm?.Emulator?.AlternateScreen ?? false)) return false;
+
+        int pageSize = Math.Max(1, Canvas.Rows - 1);
+        int maxOffset = ViewportCalculator.MaxScrollOffset(buf.Rows, Canvas.Rows, buf.ScrollbackCount);
+        _viewport.ScrollOffset = up
+            ? Math.Min(_viewport.ScrollOffset + pageSize, maxOffset)
+            : Math.Max(_viewport.ScrollOffset - pageSize, 0);
+        _viewport.UserScrolledBack = _viewport.ScrollOffset > 0;
+        UpdateScrollBar();
+        Canvas.Invalidate();
+        return true;
+    }
+
+    private bool TryUndoRedo(bool redo)
+    {
+        if (_vm == null) return false;
+
+        var now = DateTime.UtcNow;
+        if ((now - _lastUndoRedoTime).TotalMilliseconds < 150)
+            return true; // swallow rapid repeats but mark handled
+        _lastUndoRedoTime = now;
+
+        var target = redo ? _vm.InputUndo.Redo() : _vm.InputUndo.Undo();
+        if (target != null)
+            ApplyUndoRedo(target);
+        return true;
+    }
+
+    private bool TryCopySelection()
+    {
+        var selCanvas = Canvas.SelectionStart != null ? Canvas
+                      : (_isSplit && PinnedCanvas.SelectionStart != null ? PinnedCanvas : null);
+        if (selCanvas == null) return false;
+
+        var text = selCanvas.GetSelectedText();
+        if (!string.IsNullOrEmpty(text))
+        {
+            Clipboard.SetText(text);
+            ClearSelection(selCanvas);
+            selCanvas.Invalidate();
+        }
+        return true;
+    }
+
+    private void PasteFromClipboard()
+    {
+        if (_vm == null) return;
+        string? textToPaste = null;
+        if (Clipboard.ContainsImage())
+        {
+            var image = Clipboard.GetImage();
+            if (image != null)
+            {
+                var path = _vm.PasteImage?.Invoke(image);
+                if (path != null)
+                    textToPaste = path;
+            }
+        }
+        else if (Clipboard.ContainsText())
+        {
+            textToPaste = Clipboard.GetText();
+        }
+
+        if (textToPaste == null) return;
+
+        if (_inputEditor.HasSelection && !textToPaste.Contains('\n') && _inputEditor.DeleteSelection(textToPaste))
+        {
+            ScrollToBottom();
+            return;
+        }
+
+        PasteText(textToPaste);
+    }
+
+    private long ScreenRowToAbsoluteRow(TerminalBuffer buffer, int screenRow)
+        => InputLineEditor.ScreenRowToAbsoluteRow(buffer, Canvas.Rows, screenRow);
+
     protected override void OnPreviewTextInput(TextCompositionEventArgs e)
     {
         if (_vm == null || !_vm.IsConnected || string.IsNullOrEmpty(e.Text)) return;
@@ -361,171 +500,21 @@ public partial class TerminalView : UserControl
         // When search bar or overlay is active, let the TextBox handle text input natively
         if (_searchActive || _overlayActive) return;
 
+        // If there is a selection within the input line, replace it with the typed text
+        if (_inputEditor.HasSelection && _inputEditor.DeleteSelection(e.Text))
+        {
+            ScrollToBottom();
+            e.Handled = true;
+            return;
+        }
+
         // Track typed characters for undo
         _vm.CurrentInputLine.Append(e.Text);
         _vm.InputUndo.Record(_vm.CurrentInputLine.ToString(), "char");
 
-        ClearSelection();
+        _inputEditor.ClearSelection();
         ScrollToBottom();
         _vm.WriteUserInput(InputEncoder.EncodeText(e.Text));
-        e.Handled = true;
-    }
-
-    // ─── Mouse Input ─────────────────────────────────────────────────────
-
-    protected override void OnMouseLeftButtonDown(MouseButtonEventArgs e)
-    {
-        // Don't intercept mouse events targeted at the overlay TextBox
-        if (_overlayActive && e.OriginalSource is DependencyObject src &&
-            IsDescendantOf(src, InputOverlay))
-            return;
-
-        Canvas.Focus();
-        var pos = e.GetPosition(Canvas);
-        var (row, col) = Canvas.HitTest(pos);
-
-        if (e.ClickCount == 2)
-        {
-            // Double-click: select the word under cursor
-            SelectWordAt(row, col);
-            _selecting = false;
-            e.Handled = true;
-            return;
-        }
-
-        ClearSelection();
-        Canvas.SelectionStart = (row, col);
-        Canvas.SelectionEnd = (row, col);
-        _selecting = true;
-        Canvas.CaptureMouse();
-        e.Handled = true;
-    }
-
-    private void SelectWordAt(long absRow, int col)
-    {
-        var buffer = _vm?.Emulator?.Buffer;
-        if (buffer == null) return;
-
-        // Convert absolute row to viewport row for cell access
-        int viewRow = (int)(absRow - buffer.TotalLinesScrolled + buffer.ScrollOffset);
-        if (viewRow < 0 || viewRow >= buffer.Rows) return;
-
-        char CharAt(int c) => c >= 0 && c < buffer.Columns
-            ? buffer.GetVisibleCell(viewRow, c).Character
-            : '\0';
-
-        char ch = CharAt(col);
-        if (ch == '\0' || ch == ' ') return;
-
-        bool IsWordChar(char c) => c != '\0' && c != ' ';
-
-        int start = col;
-        while (start > 0 && IsWordChar(CharAt(start - 1)))
-            start--;
-
-        int end = col;
-        while (end < buffer.Columns - 1 && IsWordChar(CharAt(end + 1)))
-            end++;
-
-        Canvas.SelectionStart = (absRow, start);
-        Canvas.SelectionEnd = (absRow, end);
-        Canvas.Invalidate();
-    }
-
-    protected override void OnMouseMove(MouseEventArgs e)
-    {
-        if (!_selecting) return;
-
-        var pos = e.GetPosition(Canvas);
-        var (row, col) = Canvas.HitTest(pos);
-        Canvas.SelectionEnd = (row, col);
-        Canvas.Invalidate();
-        e.Handled = true;
-    }
-
-    protected override void OnMouseLeftButtonUp(MouseButtonEventArgs e)
-    {
-        if (!_selecting) return;
-        _selecting = false;
-        Canvas.ReleaseMouseCapture();
-
-        // If selection is trivial (click with minimal drag), treat as a click to reposition cursor
-        var start = Canvas.SelectionStart;
-        var end = Canvas.SelectionEnd;
-        if (start != null && end != null
-            && start.Value.Row == end.Value.Row
-            && Math.Abs(start.Value.Col - end.Value.Col) <= 3)
-        {
-            ClearSelection();
-            TryRepositionCursor(end.Value);
-        }
-
-        Canvas.Invalidate();
-        e.Handled = true;
-    }
-
-    /// <summary>
-    /// Sends left/right arrow key sequences to move the shell cursor to the clicked column.
-    /// Only works at the prompt line (not in alternate screen, not scrolled back).
-    /// </summary>
-    private void TryRepositionCursor((long Row, int Col) target)
-    {
-        if (_vm?.Emulator == null || !_vm.IsConnected) return;
-
-        var emulator = _vm.Emulator;
-        var buffer = emulator.Buffer;
-
-        // Only at live prompt: not in TUI mode, not scrolled back
-        if (emulator.AlternateScreen) return;
-        if (buffer.ScrollOffset != 0) return;
-
-        // Only on the cursor's current row (compare in absolute space)
-        if (target.Row != buffer.TotalLinesScrolled + buffer.CursorRow) return;
-
-        int delta = target.Col - buffer.CursorCol;
-        System.Diagnostics.Debug.WriteLine($"[Reposition] target=({target.Row},{target.Col}) cursor=({buffer.CursorRow},{buffer.CursorCol}) delta={delta}");
-        if (delta == 0) return;
-
-        // Send the appropriate arrow key sequences as a single batch
-        var arrowKey = delta > 0 ? ConsoleKey.RightArrow : ConsoleKey.LeftArrow;
-        int count = Math.Abs(delta);
-        var oneArrow = InputEncoder.EncodeKey(arrowKey, ctrl: false, shift: false);
-        var batch = new byte[oneArrow.Length * count];
-        for (int i = 0; i < count; i++)
-            Buffer.BlockCopy(oneArrow, 0, batch, i * oneArrow.Length, oneArrow.Length);
-        _vm.WriteUserInput(batch);
-    }
-
-    protected override void OnMouseRightButtonDown(MouseButtonEventArgs e)
-    {
-        // Don't intercept mouse events targeted at the overlay TextBox
-        if (_overlayActive && e.OriginalSource is DependencyObject src &&
-            IsDescendantOf(src, InputOverlay))
-            return;
-
-        // Right-click paste
-        Canvas.Focus();
-        if (_vm != null && _vm.IsConnected && Clipboard.ContainsText())
-        {
-            PasteText(Clipboard.GetText());
-        }
-        e.Handled = true;
-    }
-
-    protected override void OnMouseWheel(MouseWheelEventArgs e)
-    {
-        var buffer = _vm?.Emulator?.Buffer;
-        if (buffer == null || (_vm?.Emulator?.AlternateScreen ?? false))
-        {
-            e.Handled = true;
-            return;
-        }
-
-        int delta = e.Delta > 0 ? 3 : -3; // scroll up = increase offset
-        buffer.ScrollOffset = Math.Clamp(buffer.ScrollOffset + delta, 0, buffer.ScrollbackCount);
-        _userScrolledBack = buffer.ScrollOffset > 0;
-        UpdateScrollBar();
-        Canvas.Invalidate();
         e.Handled = true;
     }
 
@@ -538,10 +527,9 @@ public partial class TerminalView : UserControl
 
         // ScrollBar value: 0 = top of scrollback, max = at bottom (live)
         // ScrollOffset: 0 = at bottom (live), max = top of scrollback
-        int maxOffset = buffer.ScrollbackCount;
-        buffer.ScrollOffset = maxOffset - (int)e.NewValue;
-        buffer.ClampScrollOffset();
-        _userScrolledBack = buffer.ScrollOffset > 0;
+        int maxOffset = ViewportCalculator.MaxScrollOffset(buffer.Rows, Canvas.Rows, buffer.ScrollbackCount);
+        _viewport.ScrollOffset = Math.Clamp(maxOffset - (int)e.NewValue, 0, maxOffset);
+        _viewport.UserScrolledBack = _viewport.ScrollOffset > 0;
         Canvas.Invalidate();
     }
 
@@ -551,27 +539,27 @@ public partial class TerminalView : UserControl
         if (buffer == null) return;
 
         bool isAlternate = _vm?.Emulator?.AlternateScreen ?? false;
-        int scrollbackCount = buffer.ScrollbackCount;
+        int maxOffset = ViewportCalculator.MaxScrollOffset(buffer.Rows, Canvas.Rows, buffer.ScrollbackCount);
 
-        if (isAlternate || scrollbackCount == 0)
+        if (isAlternate || maxOffset == 0)
         {
             VerticalScrollBar.Visibility = Visibility.Collapsed;
             return;
         }
 
         VerticalScrollBar.Visibility = Visibility.Visible;
-        VerticalScrollBar.Maximum = scrollbackCount;
-        VerticalScrollBar.ViewportSize = buffer.Rows;
+        VerticalScrollBar.Maximum = maxOffset;
+        VerticalScrollBar.ViewportSize = Math.Min(Canvas.Rows, buffer.Rows);
         // Convert ScrollOffset (0=bottom) to ScrollBar value (max=bottom)
-        VerticalScrollBar.Value = scrollbackCount - buffer.ScrollOffset;
+        VerticalScrollBar.Value = maxOffset - _viewport.ScrollOffset;
     }
 
     private void ScrollToBottom()
     {
         var buffer = _vm?.Emulator?.Buffer;
         if (buffer == null) return;
-        buffer.ScrollOffset = 0;
-        _userScrolledBack = false;
+        _viewport.ScrollOffset = 0;
+        _viewport.UserScrolledBack = false;
         UpdateScrollBar();
     }
 
@@ -621,360 +609,7 @@ public partial class TerminalView : UserControl
             _vm.InputUndo.Record(_vm.CurrentInputLine.ToString(), "paste");
     }
 
-    private void ApplyUndoRedo(string targetText)
-    {
-        if (_vm == null) return;
-        var currentText = _vm.CurrentInputLine.ToString();
-
-        // Only delete the differing suffix and type the replacement,
-        // sending everything as a single atomic write to avoid race conditions.
-        int commonLen = 0;
-        int minLen = Math.Min(currentText.Length, targetText.Length);
-        while (commonLen < minLen && currentText[commonLen] == targetText[commonLen])
-            commonLen++;
-
-        int charsToDelete = currentText.Length - commonLen;
-        string charsToType = targetText.Substring(commonLen);
-
-        var backspaces = new byte[charsToDelete];
-        Array.Fill(backspaces, (byte)0x7F);
-        var replacement = InputEncoder.EncodeText(charsToType);
-
-        // Combine into a single write so ConPTY delivers atomically
-        var combined = new byte[backspaces.Length + replacement.Length];
-        Buffer.BlockCopy(backspaces, 0, combined, 0, backspaces.Length);
-        Buffer.BlockCopy(replacement, 0, combined, backspaces.Length, replacement.Length);
-        if (combined.Length > 0)
-            _vm.WriteUserInput(combined);
-
-        // Update tracking
-        _vm.CurrentInputLine.Clear();
-        _vm.CurrentInputLine.Append(targetText);
-    }
-
-    private void ClearSelection()
-    {
-        Canvas.SelectionStart = null;
-        Canvas.SelectionEnd = null;
-    }
-
-    private static bool IsDescendantOf(DependencyObject child, DependencyObject parent)
-    {
-        var current = child;
-        while (current != null)
-        {
-            if (current == parent) return true;
-            current = VisualTreeHelper.GetParent(current);
-        }
-        return false;
-    }
-
-    // ─── Alternate Screen Input Overlay ───────────────────────────────────
-
-    private static readonly byte[] BracketedPasteStart = { 0x1B, (byte)'[', (byte)'2', (byte)'0', (byte)'0', (byte)'~' };
-    private static readonly byte[] BracketedPasteEnd = { 0x1B, (byte)'[', (byte)'2', (byte)'0', (byte)'1', (byte)'~' };
-
-    private void ShowOverlay()
-    {
-        App.Events.Log(this, "Overlay shown (alternate screen entered)", category: "Terminal");
-        _overlayActive = true;
-        InputOverlay.Visibility = Visibility.Visible;
-        Dispatcher.BeginInvoke(() => OverlayInput.Focus(), DispatcherPriority.Input);
-    }
-
-    private void HideOverlay()
-    {
-        App.Events.Log(this, "Overlay hidden (alternate screen exited)", category: "Terminal");
-        _overlayActive = false;
-        InputOverlay.Visibility = Visibility.Collapsed;
-        // Don't clear text — preserve it across hide/show in case the TUI app
-        // briefly exits and re-enters alternate screen (e.g. Claude status updates)
-        Dispatcher.BeginInvoke(() => Canvas.Focus(), DispatcherPriority.Input);
-    }
-
-    private void HandleOverlayKeyDown(KeyEventArgs e)
-    {
-        if (_vm == null) return;
-
-        bool ctrl = (Keyboard.Modifiers & ModifierKeys.Control) != 0;
-        bool shift = (Keyboard.Modifiers & ModifierKeys.Shift) != 0;
-
-        // Enter (no modifier) → submit text to ConPTY
-        if (e.Key == Key.Enter && !shift && !ctrl)
-        {
-            SubmitOverlayInput();
-            e.Handled = true;
-            return;
-        }
-
-        // Shift+Enter → insert newline in TextBox
-        if (e.Key == Key.Enter && (shift || ctrl))
-        {
-            OverlayInput.SelectedText = "\n";
-            OverlayInput.CaretIndex = OverlayInput.SelectionStart + 1;
-            e.Handled = true;
-            return;
-        }
-
-        // Escape → clear TextBox, send Escape to ConPTY
-        if (e.Key == Key.Escape)
-        {
-            OverlayInput.Clear();
-            _vm.WriteUserInput(InputEncoder.EncodeKey(ConsoleKey.Escape));
-            e.Handled = true;
-            return;
-        }
-
-        // Up/Down with empty TextBox → forward to ConPTY (TUI history/navigation)
-        if ((e.Key == Key.Up || e.Key == Key.Down) && string.IsNullOrEmpty(OverlayInput.Text))
-        {
-            var key = e.Key == Key.Up ? ConsoleKey.UpArrow : ConsoleKey.DownArrow;
-            _vm.WriteUserInput(InputEncoder.EncodeKey(key, ctrl, shift: shift));
-            e.Handled = true;
-            return;
-        }
-
-        // Tab → forward to ConPTY (TUI completion)
-        if (e.Key == Key.Tab)
-        {
-            _vm.WriteUserInput(InputEncoder.EncodeKey(ConsoleKey.Tab, shift: shift));
-            e.Handled = true;
-            return;
-        }
-
-        // Ctrl+C → clear TextBox, send interrupt to ConPTY
-        if (ctrl && e.Key == Key.C)
-        {
-            OverlayInput.Clear();
-            _vm.WriteUserInput(new byte[] { 0x03 }); // ETX
-            e.Handled = true;
-            return;
-        }
-
-        // Ctrl+V → paste into TextBox
-        if (ctrl && e.Key == Key.V)
-        {
-            if (Clipboard.ContainsText())
-            {
-                OverlayInput.SelectedText = Clipboard.GetText();
-            }
-            e.Handled = true;
-            return;
-        }
-
-        // All other keys: let the TextBox handle natively
-        // (Ctrl+Z/Y undo/redo, Ctrl+A select all, arrow keys, etc.)
-    }
-
-    private void SubmitOverlayInput()
-    {
-        if (_vm == null) return;
-
-        var text = OverlayInput.Text;
-
-        // Send the text to ConPTY
-        if (!string.IsNullOrEmpty(text))
-        {
-            if (text.Contains('\n') && _vm.Emulator?.BracketedPasteMode == true)
-            {
-                _vm.WriteUserInput(BracketedPasteStart);
-                _vm.WriteUserInput(InputEncoder.EncodeText(text));
-                _vm.WriteUserInput(BracketedPasteEnd);
-            }
-            else
-            {
-                _vm.WriteUserInput(InputEncoder.EncodeText(text));
-            }
-
-            // Track in command history
-            if (!(_vm.Emulator?.AlternateScreen ?? false))
-            {
-                CommandHistoryService.Instance.Add(text);
-                _vm.LastCommand = text;
-            }
-        }
-
-        // Send Enter
-        _vm.WriteUserInput(new byte[] { (byte)'\r' });
-
-        OverlayInput.Clear();
-    }
-
-    // ─── Search (Ctrl+F) ──────────────────────────────────────────────────
-
-    private void OpenSearch()
-    {
-        _searchActive = true;
-        SearchOverlay.Visibility = Visibility.Visible;
-
-        // Pre-populate with selected text if single-line
-        if (Canvas.SelectionStart != null && Canvas.SelectionEnd != null)
-        {
-            var text = Canvas.GetSelectedText();
-            if (!string.IsNullOrEmpty(text) && !text.Contains('\n'))
-                SearchInput.Text = text;
-        }
-
-        SearchInput.Focus();
-        SearchInput.SelectAll();
-
-        if (!string.IsNullOrEmpty(SearchInput.Text))
-            ExecuteSearch();
-    }
-
-    private void CloseSearch()
-    {
-        _searchActive = false;
-        _searchDebounceTimer?.Stop();
-        SearchOverlay.Visibility = Visibility.Collapsed;
-        _searchState.Clear();
-        Canvas.SearchMatches = null;
-        Canvas.CurrentSearchMatch = null;
-        Canvas.Invalidate();
-        if (_overlayActive)
-            Dispatcher.BeginInvoke(() => OverlayInput.Focus(), DispatcherPriority.Input);
-        else
-            Dispatcher.BeginInvoke(() => Canvas.Focus(), DispatcherPriority.Input);
-    }
-
-    private void ExecuteSearch()
-    {
-        var query = SearchInput.Text;
-        if (string.IsNullOrEmpty(query))
-        {
-            _searchState.Clear();
-            UpdateSearchIndicator();
-            Canvas.SearchMatches = null;
-            Canvas.CurrentSearchMatch = null;
-            Canvas.Invalidate();
-            return;
-        }
-
-        _searchState.Query = query;
-        _searchState.Matches.Clear();
-        _searchState.Matches.AddRange(_vm!.SearchBuffer(query));
-
-        if (_searchState.MatchCount > 0)
-        {
-            var buffer = _vm!.Emulator?.Buffer;
-            if (buffer != null)
-            {
-                long viewTop = buffer.TotalLinesScrolled - buffer.ScrollOffset;
-                int idx = _searchState.Matches.FindIndex(m => m.AbsoluteRow >= viewTop);
-                _searchState.CurrentMatchIndex = idx >= 0 ? idx : 0;
-            }
-            else
-            {
-                _searchState.CurrentMatchIndex = 0;
-            }
-        }
-        else
-        {
-            _searchState.CurrentMatchIndex = -1;
-        }
-
-        UpdateSearchIndicator();
-        Canvas.SearchMatches = _searchState.Matches;
-        Canvas.CurrentSearchMatch = _searchState.CurrentMatch;
-        Canvas.Invalidate();
-    }
-
-    private void UpdateSearchIndicator()
-    {
-        if (_searchState.MatchCount == 0)
-            SearchResultsIndicator.Text = string.IsNullOrEmpty(_searchState.Query) ? "" : "0/0";
-        else
-            SearchResultsIndicator.Text = $"{_searchState.CurrentMatchIndex + 1}/{_searchState.MatchCount}";
-    }
-
-    private void NavigateSearchNext()
-    {
-        if (_searchState.MatchCount == 0) return;
-        _searchState.CurrentMatchIndex = (_searchState.CurrentMatchIndex + 1) % _searchState.MatchCount;
-        ScrollToCurrentMatch();
-        UpdateSearchIndicator();
-        Canvas.CurrentSearchMatch = _searchState.CurrentMatch;
-        Canvas.Invalidate();
-    }
-
-    private void NavigateSearchPrevious()
-    {
-        if (_searchState.MatchCount == 0) return;
-        _searchState.CurrentMatchIndex = (_searchState.CurrentMatchIndex - 1 + _searchState.MatchCount) % _searchState.MatchCount;
-        ScrollToCurrentMatch();
-        UpdateSearchIndicator();
-        Canvas.CurrentSearchMatch = _searchState.CurrentMatch;
-        Canvas.Invalidate();
-    }
-
-    private void ScrollToCurrentMatch()
-    {
-        var match = _searchState.CurrentMatch;
-        if (match == null || _vm?.Emulator?.Buffer == null) return;
-
-        var buffer = _vm.Emulator.Buffer;
-        long matchAbsRow = match.Value.AbsoluteRow;
-
-        // Check if match is already visible
-        long viewTop = buffer.TotalLinesScrolled - buffer.ScrollOffset;
-        long viewBottom = viewTop + buffer.Rows - 1;
-
-        if (matchAbsRow >= viewTop && matchAbsRow <= viewBottom)
-            return;
-
-        // Place match in the middle of the viewport
-        int targetOffset = (int)(buffer.TotalLinesScrolled - matchAbsRow + buffer.Rows / 2);
-        buffer.ScrollOffset = Math.Clamp(targetOffset, 0, buffer.ScrollbackCount);
-        _userScrolledBack = buffer.ScrollOffset > 0;
-        UpdateScrollBar();
-    }
-
-    private void OnSearchInputKeyDown(object sender, KeyEventArgs e)
-    {
-        if (e.Key == Key.Escape)
-        {
-            CloseSearch();
-            e.Handled = true;
-        }
-        else if (e.Key == Key.Enter)
-        {
-            bool shift = (Keyboard.Modifiers & ModifierKeys.Shift) != 0;
-            if (shift) NavigateSearchPrevious();
-            else NavigateSearchNext();
-            e.Handled = true;
-        }
-        else if (e.Key == Key.Up)
-        {
-            NavigateSearchPrevious();
-            e.Handled = true;
-        }
-        else if (e.Key == Key.Down)
-        {
-            NavigateSearchNext();
-            e.Handled = true;
-        }
-    }
-
-    private void OnSearchTextChanged(object sender, TextChangedEventArgs e)
-    {
-        if (_searchDebounceTimer == null)
-        {
-            _searchDebounceTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(150) };
-            _searchDebounceTimer.Tick += OnSearchDebounce;
-        }
-        _searchDebounceTimer.Stop();
-        _searchDebounceTimer.Start();
-    }
-
-    private void OnSearchDebounce(object? sender, EventArgs e)
-    {
-        _searchDebounceTimer!.Stop();
-        ExecuteSearch();
-    }
-
-    private void OnSearchUp(object sender, RoutedEventArgs e) => NavigateSearchPrevious();
-    private void OnSearchDown(object sender, RoutedEventArgs e) => NavigateSearchNext();
-    private void OnSearchClose(object sender, RoutedEventArgs e) => CloseSearch();
+    private void ApplyUndoRedo(string targetText) => _inputEditor.ReplaceInputLine(targetText);
 
     private static ConsoleKey? MapKey(Key key)
     {

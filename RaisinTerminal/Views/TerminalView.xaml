@@ -5,7 +5,86 @@
              Background="#212121"
              Focusable="True"
              AllowDrop="True">
-    <Grid>
+    <Grid Background="#212121">
+        <Grid.RowDefinitions>
+            <RowDefinition x:Name="PinnedPaneRow" Height="0"/>
+            <RowDefinition x:Name="SplitterRow" Height="0"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+        <!-- Pinned pane (top half of split): independently-scrolled view onto the same buffer -->
+        <Grid x:Name="PinnedPane" Grid.Row="0" Visibility="Collapsed">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <controls:TerminalCanvas x:Name="PinnedCanvas"
+                                     Grid.Column="0"
+                                     Focusable="False"
+                                     Cursor="IBeam"/>
+            <Button x:Name="CloseSplitButton"
+                    Grid.Column="0"
+                    Content="&#x2715;"
+                    FontSize="12"
+                    Width="20" Height="20"
+                    HorizontalAlignment="Right"
+                    VerticalAlignment="Top"
+                    Margin="0,2,2,0"
+                    BorderThickness="0"
+                    Focusable="False"
+                    Click="OnCloseSplit"
+                    ToolTip="Close split (Ctrl+Shift+E)">
+                <Button.Template>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}" CornerRadius="2">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                    </ControlTemplate>
+                </Button.Template>
+                <Button.Style>
+                    <Style TargetType="Button">
+                        <Setter Property="Background" Value="#60444444"/>
+                        <Setter Property="Foreground" Value="#AAAAAA"/>
+                        <Style.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Background" Value="#555555"/>
+                                <Setter Property="Foreground" Value="#DDDDDD"/>
+                            </Trigger>
+                        </Style.Triggers>
+                    </Style>
+                </Button.Style>
+            </Button>
+            <ScrollBar x:Name="PinnedScrollBar"
+                       Grid.Column="1"
+                       Orientation="Vertical"
+                       Minimum="0"
+                       Maximum="0"
+                       Value="0"
+                       SmallChange="1"
+                       LargeChange="10"
+                       Visibility="Collapsed"
+                       Focusable="False"
+                       Width="14"
+                       Background="#2A2A2A">
+                <ScrollBar.Resources>
+                    <Style TargetType="RepeatButton">
+                        <Setter Property="Background" Value="#2A2A2A"/>
+                        <Setter Property="BorderBrush" Value="#2A2A2A"/>
+                    </Style>
+                </ScrollBar.Resources>
+            </ScrollBar>
+        </Grid>
+        <!-- Draggable divider between pinned and live panes; collapsed when split is off -->
+        <GridSplitter x:Name="PaneSplitter"
+                      Grid.Row="1"
+                      Height="4"
+                      HorizontalAlignment="Stretch"
+                      VerticalAlignment="Center"
+                      Background="#333333"
+                      Visibility="Collapsed"
+                      ResizeBehavior="PreviousAndNext"
+                      ShowsPreview="False"/>
+        <!-- Live pane (bottom): the primary interactive terminal view -->
+        <Grid Grid.Row="2">
         <Grid.ColumnDefinitions>
             <ColumnDefinition Width="*"/>
             <ColumnDefinition Width="Auto"/>
@@ -186,5 +265,6 @@
                 </Style>
             </ScrollBar.Resources>
         </ScrollBar>
+        </Grid>
     </Grid>
 </UserControl>
