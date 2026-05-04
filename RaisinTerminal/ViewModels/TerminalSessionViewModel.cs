@@ -139,6 +139,39 @@ public partial class TerminalSessionViewModel : ToolWindowViewModel
     }
 
     /// <summary>
+    /// Reads a line of text, replacing faded/predictive characters with spaces.
+    /// Cells with the Dim attribute or a foreground brightness below 50% of the
+    /// default are treated as predictive text (e.g. Claude Code's auto-suggestions).
+    /// </summary>
+    public string ReadScreenLineBrightOnly(int row)
+    {
+        lock (_lock)
+        {
+            var buf = _emulator?.Buffer;
+            if (buf == null || row < 0 || row >= buf.Rows) return "";
+
+            var sb = new StringBuilder(buf.Columns);
+            for (int col = 0; col < buf.Columns; col++)
+            {
+                var cell = buf.GetCell(row, col);
+                if (IsFadedCell(cell))
+                    sb.Append(' ');
+                else
+                    sb.Append(cell.Character);
+            }
+            return sb.ToString().TrimEnd();
+        }
+    }
+
+    private static bool IsFadedCell(CellData cell)
+    {
+        if (cell.Character == ' ') return false;
+        if (cell.Dim) return true;
+        int brightness = (cell.ForegroundR + cell.ForegroundG + cell.ForegroundB) / 3;
+        return brightness < 102;
+    }
+
+    /// <summary>
     /// Searches the entire buffer (scrollback + screen) for the given text.
     /// Returns results sorted by position (top to bottom, left to right).
     /// Thread-safe (acquires _lock).

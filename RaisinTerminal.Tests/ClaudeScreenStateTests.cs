@@ -35,6 +35,18 @@ public class ClaudeScreenStateTests
     }
 
     [Fact]
+    public void IdlePrompt_AsciiAfterPredictiveTextStripped_ReturnsIdle()
+    {
+        // After ReadScreenLineBrightOnly strips dim predictive text,
+        // the prompt line becomes just "> " which is short enough to match
+        var screen = Screen(
+            "Some output text",
+            "> ");
+        Assert.Equal(TerminalStatus.Idle,
+            ClaudeScreenStateClassifier.Classify(screen, cursorRow: 1, screenRows: 2));
+    }
+
+    [Fact]
     public void AsciiGreaterThan_LongLine_NotTreatedAsIdle()
     {
         // ">" on a long line is quoted text, not the idle prompt

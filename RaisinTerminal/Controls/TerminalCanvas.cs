@@ -196,9 +196,29 @@ public partial class TerminalCanvas : FrameworkElement
                     buffer.ScrollbackCount, viewOffset, scrollOffset);
             }
 
+            if (extraRows > 0 && buffer.ScrollbackCount > 0)
+            {
+                // Extra rows display the newest N scrollback lines. If the
+                // newest scrollback line is empty (e.g., empty rows pushed by
+                // scrolling), don't show extra rows — they'd just add blank
+                // space above the content.
+                int newestSb = buffer.ScrollbackCount - 1;
+                if (buffer.IsScrollbackLineEmpty(newestSb))
+                    extraRows = 0;
+            }
+
             if (extraRows == 0 && (topAnchor || displayedBaseRows < baseRowCount))
             {
                 rowYPositions = basePositions;
+            }
+            else if (extraRows == 0 && displayedBaseRows == baseRowCount)
+            {
+                // Full buffer, no scrollback to fill compression gaps.
+                // Use uniform row height — compression would create a gap
+                // at top with nothing to fill it.
+                var noCompression = new bool[baseRowCount];
+                rowYPositions = RowLayoutCalculator.ComputeLayout(
+                    noCompression, displayCursorRow, _cellHeight, EmptyRowScale, ActualHeight);
             }
             else
             {
@@ -208,16 +228,71 @@ public partial class TerminalCanvas : FrameworkElement
                     allIsEmpty[row] = IsRowEmptyForDisplay(buffer, row, extraRows, scrollOffset, baseRowCount);
 
                 int adjustedCursorRow = displayCursorRow + extraRows;
-                if (topAnchor)
+                if (topAnchor || baseRowCount < Rows || displayedBaseRows < baseRowCount)
                 {
                     rowYPositions = RowLayoutCalculator.ComputeRowYPositions(
                         allIsEmpty, adjustedCursorRow, _cellHeight, EmptyRowScale);
+
+                    while (extraRows > 0 && rowYPositions[totalCandidateRows] > ActualHeight)
+                    {
+                        extraRows--;
+                        totalCandidateRows = displayedBaseRows + extraRows;
+                        allIsEmpty = new bool[totalCandidateRows];
+                        for (int row = 0; row < totalCandidateRows; row++)
+                            allIsEmpty[row] = IsRowEmptyForDisplay(buffer, row, extraRows, scrollOffset, baseRowCount);
+                        adjustedCursorRow = displayCursorRow + extraRows;
+                        rowYPositions = RowLayoutCalculator.ComputeRowYPositions(
+                            allIsEmpty, adjustedCursorRow, _cellHeight, EmptyRowScale);
+                    }
+
+                    int maxAvailable = Math.Max(0, buffer.ScrollbackCount + viewOffset - scrollOffset);
+                    while (extraRows < maxAvailable && rowYPositions[totalCandidateRows] + _cellHeight <= ActualHeight)
+                    {
+                        extraRows++;
+                        totalCandidateRows = displayedBaseRows + extraRows;
+                        allIsEmpty = new bool[totalCandidateRows];
+                        for (int row = 0; row < totalCandidateRows; row++)
+                            allIsEmpty[row] = IsRowEmptyForDisplay(buffer, row, extraRows, scrollOffset, baseRowCount);
+                        adjustedCursorRow = displayCursorRow + extraRows;
+                        rowYPositions = RowLayoutCalculator.ComputeRowYPositions(
+                            allIsEmpty, adjustedCursorRow, _cellHeight, EmptyRowScale);
+                        if (rowYPositions[totalCandidateRows] > ActualHeight)
+                        {
+                            extraRows--;
+                            totalCandidateRows = displayedBaseRows + extraRows;
+                            allIsEmpty = new bool[totalCandidateRows];
+                            for (int row = 0; row < totalCandidateRows; row++)
+                                allIsEmpty[row] = IsRowEmptyForDisplay(buffer, row, extraRows, scrollOffset, baseRowCount);
+                            adjustedCursorRow = displayCursorRow + extraRows;
+                            rowYPositions = RowLayoutCalculator.ComputeRowYPositions(
+                                allIsEmpty, adjustedCursorRow, _cellHeight, EmptyRowScale);
+                            break;
+                        }
+                    }
                 }
                 else
                 {
                     rowYPositions = RowLayoutCalculator.ComputeLayout(
                         allIsEmpty, adjustedCursorRow, _cellHeight, EmptyRowScale, ActualHeight);
                 }
+            }
+
+            // If top-aligned content doesn't fill the canvas and there are
+            // trimmed trailing empty rows we can restore, grow displayedBaseRows
+            // to eliminate the gap at the bottom.
+            while (displayedBaseRows < baseRowCount)
+            {
+                int total = displayedBaseRows + extraRows;
+                if (rowYPositions[total] + _cellHeight > ActualHeight)
+                    break;
+                displayedBaseRows++;
+                total = displayedBaseRows + extraRows;
+                var allIsEmpty2 = new bool[total];
+                for (int row = 0; row < total; row++)
+                    allIsEmpty2[row] = IsRowEmptyForDisplay(buffer, row, extraRows, scrollOffset, baseRowCount);
+                int adjCursor = displayCursorRow + extraRows;
+                rowYPositions = RowLayoutCalculator.ComputeRowYPositions(
+                    allIsEmpty2, adjCursor, _cellHeight, EmptyRowScale);
             }
         }
         else

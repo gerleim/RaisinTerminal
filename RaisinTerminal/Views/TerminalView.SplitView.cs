@@ -13,6 +13,7 @@ public partial class TerminalView
     private readonly TerminalViewport _pinnedViewport = new() { IsLive = false };
     private bool _pinnedSelecting;
     private bool _isSplit;
+    private bool _suppressResize;
 
     private void InitSplitView()
     {
@@ -48,6 +49,8 @@ public partial class TerminalView
         _pinnedViewport.ScrollOffset = start;
         _pinnedViewport.UserScrolledBack = _pinnedViewport.ScrollOffset > 0;
 
+        _suppressResize = true;
+
         PinnedPane.Visibility = Visibility.Visible;
         PaneSplitter.Visibility = Visibility.Visible;
         PinnedPaneRow.Height = new GridLength(1, GridUnitType.Star);
@@ -57,7 +60,11 @@ public partial class TerminalView
         UpdatePinnedScrollBar();
         PinnedCanvas.Invalidate();
 
-        Dispatcher.BeginInvoke(AdjustPinnedForEmpties, DispatcherPriority.Background);
+        Dispatcher.BeginInvoke(() =>
+        {
+            _suppressResize = false;
+            AdjustPinnedForEmpties();
+        }, DispatcherPriority.Background);
     }
 
     private bool IsVisibleRowEmpty(TerminalBuffer buffer, int row, int offset, int viewRows)
@@ -130,6 +137,8 @@ public partial class TerminalView
     {
         if (!_isSplit) return;
 
+        _suppressResize = true;
+
         var buffer = _vm?.Emulator?.Buffer;
         buffer?.Viewports.Remove(_pinnedViewport);
 
@@ -143,6 +152,8 @@ public partial class TerminalView
         _isSplit = false;
         _pinnedCanvasRowsPrev = 0;
         Canvas.Focus();
+
+        Dispatcher.BeginInvoke(() => { _suppressResize = false; }, DispatcherPriority.Background);
     }
 
     private void OnCloseSplit(object sender, RoutedEventArgs e) => CloseSplit();

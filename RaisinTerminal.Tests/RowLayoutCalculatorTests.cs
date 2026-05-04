@@ -187,16 +187,15 @@ public class RowLayoutCalculatorTests
     }
 
     [Fact]
-    public void Layout_FewerRowsThanCanvas_GapAtTop()
+    public void Layout_AlwaysBottomAligns()
     {
-        // Only 5 rows, canvas fits 30 → gap at top
         var empty = new bool[5];
         var pos = RowLayoutCalculator.ComputeLayout(empty, -1, CellHeight, EmptyRowScale, CanvasHeight);
 
-        // Last row ends at canvas height
+        // Last row ends at canvasHeight (bottom-aligned)
         Assert.Equal(CanvasHeight, pos[5]);
-        // First row starts well above 0 (gap at top)
-        Assert.True(pos[0] > 0, "With few rows, first row should start above 0");
+        // First row starts offset from top
+        Assert.Equal(CanvasHeight - 5 * CellHeight, pos[0]);
         // Each row is cellHeight
         for (int i = 0; i < 5; i++)
             Assert.Equal(CellHeight, pos[i + 1] - pos[i], 0.01);

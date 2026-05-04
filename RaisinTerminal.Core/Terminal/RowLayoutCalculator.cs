@@ -46,12 +46,6 @@ public static class RowLayoutCalculator
     /// at the top get negative Y positions (clipped by the renderer).
     /// Row heights are constant — no inflation, no redistribution.
     /// </summary>
-    /// <param name="rowIsEmpty">Per-row emptiness flags for all candidate rows.</param>
-    /// <param name="cursorRow">Cursor row index to protect from compression (-1 if none).</param>
-    /// <param name="cellHeight">Normal row height in pixels.</param>
-    /// <param name="emptyRowScale">Fraction of cellHeight for compressed rows.</param>
-    /// <param name="canvasHeight">Total canvas height in pixels.</param>
-    /// <returns>Array of length rowCount+1 with Y-positions; positions[rowCount] == canvasHeight.</returns>
     public static double[] ComputeLayout(
         bool[] rowIsEmpty,
         int cursorRow,

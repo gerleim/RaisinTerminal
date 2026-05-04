@@ -418,6 +418,252 @@ public class Level5_ClaudeSuppressionTests
     }
 
     [Fact]
+    public void ClaudeSuppression_CupContentSurvivesIdleFlushAndScroll()
+    {
+        // Reproduces: Claude streams content via CUP to rows near the bottom,
+        // an idle flush commits deferred scrollback, then more streaming output
+        // scrolls the CUP-written content off-screen. The CUP-written rows
+        // must appear in scrollback after the second idle flush.
+        var t = new TerminalTestHarness(30, 10);
+        t.SetClaudeRedrawSuppression(true);
+
+        // Frame 1: initial render fills screen, activates suppression
+        t.CursorHome();
+        Assert.False(t.Buffer.SuppressScrollback, "First CUP skipped");
+        t.CursorHome();
+        Assert.True(t.Buffer.SuppressScrollback, "Second CUP activates suppression");
+
+        // Fill screen with baseline content (rows 0-9)
+        t.FeedLines("R0", "R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9");
+
+        // Simulate idle flush — commits any deferred overflow
+        t.Buffer.FlushDeferredScrollback();
+        int afterFlush1 = t.Buffer.ScrollbackCount;
+
+        // Now Claude streams NEW content via CUP at rows near the bottom
+        // (mimics Claude painting "EN header" at row 8, blockquote at row 9)
+        t.CursorTo(8, 1).Feed("EN HEADER LINE HERE");
+        t.NewLine();
+        t.Feed("BLOCKQUOTE TEXT HERE IMPORTANT");
+        // Cursor is at row 9 (bottom) after writing blockquote
+
+        // More output scrolls everything up — 12 new lines pushes all content through
+        t.NewLine();
+        for (int i = 0; i < 11; i++)
+            t.Feed($"NEW{i}\r\n");
+        t.Feed("LAST");
+
+        // Simulate idle flush
+        t.Buffer.FlushDeferredScrollback();
+
+        // The CUP-written content must survive in scrollback
+        var allScrollback = t.GetAllScrollbackLines();
+        bool foundHeader = allScrollback.Any(l => l.Contains("EN HEADER"));
+        bool foundBlockquote = allScrollback.Any(l => l.Contains("BLOCKQUOTE TEXT"));
+
+        Assert.True(foundHeader,
+            $"EN HEADER must be in scrollback. Scrollback ({allScrollback.Length} lines): " +
+            string.Join(" | ", allScrollback.Select((l, i) => $"[{i}]={l}")));
+        Assert.True(foundBlockquote,
+            $"BLOCKQUOTE TEXT must be in scrollback. Scrollback ({allScrollback.Length} lines): " +
+            string.Join(" | ", allScrollback.Select((l, i) => $"[{i}]={l}")));
+    }
+
+    [Fact]
+    public void ClaudeSuppression_WrappedLineThenCup_BlockquotePreserved()
+    {
+        // Real scenario: 152-col/49-row terminal. CUP 45;3 writes header.
+        // CRLF. 154 spaces (>152 cols → wrap). Title on next row. CRLF.
+        // Blockquote text at the row below. CUP 49;3 targets the last row.
+        //
+        // With enough rows between header and bottom, blockquote is safe.
+        // But when header is close to the bottom AND the wrap-induced scroll
+        // pushes blockquote onto the CUP target row, it gets overwritten.
+        //
+        // Reproduces with 30-col, 20-row screen:
+        // CUP to row 16 (4 from bottom), wrap adds extra row, blockquote
+        // and CUP 20;3 target different rows — no overwrite.
+        var t = new TerminalTestHarness(30, 20);
+        t.SetClaudeRedrawSuppression(true);
+        t.CursorHome();
+        t.CursorHome();
+
+        // Fill baseline
+        for (int i = 0; i < 20; i++)
+            t.Feed($"R{i}\r\n");
+        t.Buffer.FlushDeferredScrollback();
+
+        // CUP to row 16 for header
+        t.CursorTo(16, 3).Feed("EN HEADER");
+        // CRLF then 34 spaces (wraps: 30 on current row, 4 on next)
+        t.NewLine();
+        t.Feed(new string(' ', 34) + "TITLE");
+        t.NewLine();
+        t.Feed("BLOCKQUOTE TEXT IMPORTANT");
+        // CUP to last row
+        t.CursorTo(20, 3).Feed("CONTINUATION LINE");
+        for (int i = 0; i < 25; i++)
+            t.Feed($"\r\nSCROLL{i}");
+        t.Buffer.FlushDeferredScrollback();
+
+        var totalContent = t.GetAllScrollbackLines()
+            .Concat(t.GetAllScreenRows()).ToArray();
+
+        bool foundBlockquote = totalContent.Any(l => l.Contains("BLOCKQUOTE TEXT IMPORTANT"));
+        Assert.True(foundBlockquote,
+            "BLOCKQUOTE TEXT must survive:\n" +
+            string.Join("\n", totalContent.Select((l, i) => $"  [{i}] \"{l}\"")));
+
+        int titleIdx = Array.FindIndex(totalContent, l => l.Contains("TITLE"));
+        int blockIdx = Array.FindIndex(totalContent, l => l.Contains("BLOCKQUOTE TEXT"));
+        int contIdx = Array.FindIndex(totalContent, l => l.Contains("CONTINUATION"));
+        Assert.True(titleIdx < blockIdx && blockIdx < contIdx,
+            $"Order: TITLE[{titleIdx}] < BLOCKQUOTE[{blockIdx}] < CONTINUATION[{contIdx}]");
+    }
+
+    [Fact]
+    public void ClaudeSuppression_RealRawReplay_BlockquotePreservedInScrollback()
+    {
+        // Replay the exact raw bytes from the real session where the EN
+        // blockquote text disappeared after "▎ Switchable Mechanisms".
+        // Screen: 152 cols × 49 rows. Pre-fill rows 0-43 with content,
+        // then replay the raw data starting from CUP 45;3.
+        var t = new TerminalTestHarness(152, 49);
+        t.SetClaudeRedrawSuppression(true);
+        t.CursorHome();
+        t.CursorHome();
+
+        // Fill rows 0-43 with baseline
+        for (int i = 0; i < 44; i++)
+            t.Feed($"ROW{i}\r\n");
+        t.Buffer.FlushDeferredScrollback();
+
+        // Replay the raw section starting from CUP 45;3
+        var path = Path.Combine(AppContext.BaseDirectory, "..", "..", "..",
+            "TestData", "interchangeable_parts_section.raw");
+        t.FeedFile(path);
+        t.Buffer.FlushDeferredScrollback();
+
+        var totalContent = t.GetAllScrollbackLines()
+            .Concat(t.GetAllScreenRows()).ToArray();
+
+        // The EN blockquote text must be present somewhere
+        bool foundBlockquote = totalContent.Any(l =>
+            l.Contains("The specimens can be anywhere"));
+        Assert.True(foundBlockquote,
+            "EN blockquote text must survive in total content. " +
+            $"Total lines: {totalContent.Length}. " +
+            "Lines containing 'Switchable': " +
+            string.Join(", ", totalContent.Select((l, i) => (l, i))
+                .Where(x => x.l.Contains("Switchable") || x.l.Contains("specimens"))
+                .Select(x => $"[{x.i}]=\"{x.l.Substring(0, Math.Min(60, x.l.Length))}...\"")));
+    }
+
+    [Fact]
+    public void ClaudeSuppression_RealRawReplay_BlockquoteVisibleWhenScrolledUp()
+    {
+        var t = new TerminalTestHarness(152, 49);
+        t.SetClaudeRedrawSuppression(true);
+        t.CursorHome();
+        t.CursorHome();
+
+        for (int i = 0; i < 44; i++)
+            t.Feed($"ROW{i}\r\n");
+        t.Buffer.FlushDeferredScrollback();
+
+        var path = Path.Combine(AppContext.BaseDirectory, "..", "..", "..",
+            "TestData", "interchangeable_parts_section.raw");
+        t.FeedFile(path);
+        t.Buffer.FlushDeferredScrollback();
+
+        var totalContent = t.GetAllScrollbackLines()
+            .Concat(t.GetAllScreenRows()).ToArray();
+        int scrollbackCount = t.Buffer.ScrollbackCount;
+
+        int titleIdx = -1, blockquoteIdx = -1, huIdx = -1;
+        for (int i = 0; i < totalContent.Length; i++)
+        {
+            if (totalContent[i].Contains("Switchable Mechanisms") && titleIdx == -1)
+                titleIdx = i;
+            if (totalContent[i].Contains("The specimens can be anywhere"))
+                blockquoteIdx = i;
+            if (totalContent[i].Contains("HU (REF DOC"))
+                huIdx = i;
+        }
+
+        Assert.True(titleIdx >= 0, "Title 'Switchable Mechanisms' must be in total content");
+        Assert.True(blockquoteIdx >= 0,
+            $"Blockquote must be in total content. Title at [{titleIdx}]. " +
+            $"Nearby: " + string.Join(" | ",
+                totalContent.Skip(Math.Max(0, titleIdx - 1)).Take(8)
+                .Select((l, i) => $"[{titleIdx - 1 + i}]=\"{l.Substring(0, Math.Min(60, l.Length))}\"")));
+        Assert.True(titleIdx < blockquoteIdx, "Title before blockquote");
+        Assert.True(huIdx < 0 || blockquoteIdx < huIdx, "Blockquote before HU");
+
+        int viewRows = 49;
+        int maxOffset = ViewportCalculator.MaxScrollOffset(
+            t.Buffer.Rows, viewRows, scrollbackCount);
+
+        // Scroll so the title row is near the top of the viewport.
+        // titleIdx is an absolute index in total content.
+        // To show absolute row R at viewport row 0, scrollOffset =
+        //   scrollbackCount + bufferRows - viewRows - R
+        // which is the same as maxOffset - R (when buffer == viewRows).
+        int scrollOffset = Math.Max(0, Math.Min(maxOffset,
+            scrollbackCount + t.Buffer.Rows - viewRows - titleIdx));
+
+        var visibleRows = t.GetVisibleRows(scrollOffset, viewRows);
+        bool blockquoteVisible = visibleRows.Any(r =>
+            r.Contains("The specimens can be anywhere"));
+
+        Assert.True(blockquoteVisible,
+            $"Blockquote must be visible when scrolled to title area. " +
+            $"scrollOffset={scrollOffset}, maxOffset={maxOffset}, " +
+            $"scrollbackCount={scrollbackCount}, titleIdx={titleIdx}, " +
+            $"blockquoteIdx={blockquoteIdx}. " +
+            $"Visible content: " + string.Join(" | ",
+                visibleRows.Where(r => !string.IsNullOrWhiteSpace(r))
+                .Take(15)
+                .Select(r => $"\"{r.Substring(0, Math.Min(60, r.Length))}\"")));
+    }
+
+    [Fact]
+    public void ClaudeSuppression_DeferredScrollbackSurvivesNextFrame()
+    {
+        // Reproduces the bug: content scrolled into deferred scrollback
+        // during one TUI frame is lost when CUP 1;1 starts the next frame.
+        // Setup: 40 cols × 5 rows.
+        // Frame 0: initial render (CUP 1;1 skips suppression per _skipNextCursorHomeSuppress)
+        // Frame 1: CUP 1;1 enables SuppressScrollback. Overflow goes to deferred.
+        // Frame 2: CUP 1;1 clears deferred → content lost!
+        var t = new TerminalTestHarness(40, 5);
+        t.SetClaudeRedrawSuppression(true);
+
+        // Frame 0: first CUP 1;1 after enabling suppression — skip flag consumed
+        t.CursorHome();
+        t.FeedLines("INIT1", "INIT2", "INIT3", "INIT4", "INIT5");
+
+        // Frame 1: second CUP 1;1 → enables SuppressScrollback
+        t.CursorHome();
+        t.FeedLines("ALPHA", "BRAVO", "CHARLIE", "DELTA", "ECHO");
+        // Screen now: ALPHA/BRAVO/CHARLIE/DELTA/ECHO
+        // Add more lines → ALPHA, BRAVO scroll into deferred scrollback
+        t.Feed("\r\n");
+        t.Feed("FOXTROT\r\n");
+        t.Feed("GOLF");
+        // Deferred should contain ALPHA and BRAVO
+
+        // Frame 2: third CUP 1;1 → ClearDeferredScrollback loses ALPHA/BRAVO
+        t.CursorHome();
+        t.FeedLines("NEW1", "NEW2", "NEW3", "NEW4", "NEW5");
+
+        // ALPHA and BRAVO must survive in real scrollback
+        var scrollback = t.GetAllScrollbackLines();
+        Assert.Contains("ALPHA", scrollback);
+        Assert.Contains("BRAVO", scrollback);
+    }
+
+    [Fact]
     public void ClaudeSuppression_ExitAndReenter_SkipRearms()
     {
         var t = new TerminalTestHarness(20, 4);
@@ -1561,5 +1807,327 @@ public class Level7_SplitPaneTests
         Assert.True(lastRow != "" && lastRow != "│",
             $"Trailing row is empty or box-drawing only. offset={pinned.ScrollOffset}, " +
             $"viewRows={viewRows}. Last row: \"{rows[rows.Length - 1]}\"");
+    }
+
+    [Fact]
+    public void SplitResize_ClaudeRedraw_NoDuplicateScrollback()
+    {
+        // Reproduces: split opens → buffer resizes (pushes rows to scrollback)
+        // → Claude redraws at new size (some rows scroll off → deferred scrollback)
+        // → deferred flush should deduplicate against resize-pushed rows.
+        var t = new TerminalTestHarness(30, 20);
+
+        // Simulate Claude's TUI: turn on ClaudeRedrawSuppression.
+        // First CUP 1;1 is skipped (initial frame), so render content normally.
+        t.SetClaudeRedrawSuppression(true);
+
+        // Fill the screen: 20 lines fit exactly, no scrollback yet.
+        for (int i = 0; i < 20; i++)
+        {
+            if (i > 0) t.Feed("\r\n");
+            t.Feed($"Item{i:D2}");
+        }
+        Assert.Equal(0, t.Buffer.ScrollbackCount);
+
+        // Feed 10 more to push content into scrollback (no trailing \r\n on last)
+        for (int i = 20; i < 30; i++)
+            t.Feed($"\r\nItem{i:D2}");
+        // scrollback: Item00..Item09 (10 lines), screen: Item10..Item29
+        int sbBefore = t.Buffer.ScrollbackCount;
+        Assert.Equal(10, sbBefore);
+
+        // Second CUP 1;1 → enables suppression (not skipped this time).
+        t.CursorHome();
+        for (int i = 10; i < 30; i++)
+        {
+            if (i > 10) t.Feed("\r\n");
+            t.Feed($"Item{i:D2}");
+        }
+        // Suppression is on; no new scrollback from this redraw.
+        Assert.Equal(sbBefore, t.Buffer.ScrollbackCount);
+
+        // Simulate the split: resize from 20 to 10 rows.
+        // Emulator.Resize lifts suppression before buffer resize so rows are preserved.
+        t.Resize(30, 10);
+        int sbAfterResize = t.Buffer.ScrollbackCount;
+        Assert.True(sbAfterResize > sbBefore,
+            $"Resize should push rows to scrollback: before={sbBefore}, after={sbAfterResize}");
+
+        // Claude receives SIGWINCH → redraws at 10 rows.
+        // CUP 1;1 flushes deferred, then re-enables suppression.
+        t.CursorHome();
+        for (int i = 10; i < 30; i++)
+        {
+            if (i > 10) t.Feed("\r\n");
+            t.Feed($"Item{i:D2}");
+        }
+        // Rows that scroll off during this redraw go to deferred scrollback.
+        // They duplicate content just pushed by resize.
+
+        // Flush deferred scrollback (simulates idle tick or next CUP 1;1 flush).
+        t.Buffer.FlushDeferredScrollback();
+
+        // Check that scrollback has no duplicates anywhere (not just consecutive).
+        var allScrollback = t.GetAllScrollbackLines();
+        var nonEmpty = allScrollback.Where(l => l != "").ToList();
+        var dupes = nonEmpty.GroupBy(l => l).Where(g => g.Count() > 1).ToList();
+        Assert.True(dupes.Count == 0,
+            $"Duplicate scrollback lines found: [{string.Join(", ", dupes.Select(g => $"\"{g.Key}\" x{g.Count()}"))}]. " +
+            $"Total scrollback: {allScrollback.Length}, non-empty: {nonEmpty.Count}");
+
+        // Verify screen content is correct (last 10 items)
+        t.AssertScreenRow(0, "Item20");
+        t.AssertScreenRow(9, "Item29");
+    }
+
+    [Fact]
+    public void SplitResize_ClaudeRedraw_ContentNotDisplaced()
+    {
+        // Reproduces: #8's content vanishes after split because duplicate #5-#7
+        // rows from deferred flush displace it. The resize pushes #5-#8 to
+        // scrollback; Claude's redraw only re-renders #5-#7 (which duplicate);
+        // if dedup fails, #8 gets buried behind extra rows.
+        var t = new TerminalTestHarness(30, 20);
+        t.SetClaudeRedrawSuppression(true);
+
+        // Build content: items 0-19 on screen, with distinct text per item.
+        for (int i = 0; i < 20; i++)
+        {
+            if (i > 0) t.Feed("\r\n");
+            t.Feed($"Item{i:D2}");
+        }
+
+        // Push items 0-4 to scrollback, screen: items 5-19 + 5 more
+        for (int i = 20; i < 25; i++)
+            t.Feed($"\r\nItem{i:D2}");
+        Assert.Equal(5, t.Buffer.ScrollbackCount);
+
+        // Second CUP 1;1 → enables suppression
+        t.CursorHome();
+        for (int i = 5; i < 25; i++)
+        {
+            if (i > 5) t.Feed("\r\n");
+            t.Feed($"Item{i:D2}");
+        }
+
+        // Split resize: 20 → 10 rows. Pushes screen[0..9] (Items 5-14) to scrollback.
+        t.Resize(30, 10);
+        int sbAfterResize = t.Buffer.ScrollbackCount;
+
+        // Claude redraws at 10 rows but only renders items 10-19
+        // (items 5-9 scroll off the top → deferred, duplicating resize-pushed rows)
+        t.CursorHome();
+        for (int i = 10; i < 25; i++)
+        {
+            if (i > 10) t.Feed("\r\n");
+            t.Feed($"Item{i:D2}");
+        }
+
+        t.Buffer.FlushDeferredScrollback();
+
+        // Verify ALL items 0-14 appear exactly once in scrollback (no displacement)
+        var sb = t.GetAllScrollbackLines().Where(l => l != "").ToList();
+        for (int i = 0; i <= 14; i++)
+        {
+            string expected = $"Item{i:D2}";
+            int count = sb.Count(l => l == expected);
+            Assert.True(count == 1,
+                $"\"{expected}\" appears {count} time(s) in scrollback (expected 1). " +
+                $"Scrollback: [{string.Join(", ", sb)}]");
+        }
+    }
+}
+
+/// <summary>
+/// Tests for content positioning when the terminal has fewer content lines
+/// than the viewport height.
+/// </summary>
+public class Level8_SparseContentTests
+{
+    [Fact]
+    public void SparseContent_EmptyScrollback_ContentAtTop()
+    {
+        // Scenario: terminal with only a few lines of content and empty rows
+        // pushed to scrollback (e.g., after scrolling through empty space).
+        // GetVisibleCell should return content at the top of the viewport.
+        var t = new TerminalTestHarness(40, 20);
+
+        // Write 5 lines of content
+        t.FeedLines("Line1", "Line2", "Line3", "Line4", "Line5");
+        Assert.Equal(4, t.Buffer.CursorRow); // cursor on row 4
+
+        // Scroll enough times to push ALL content + some empty rows into scrollback.
+        // Cursor at row 4, need 16 LFs to reach bottom (row 19) and start scrolling,
+        // then 5 more to push the content rows, then more to push empties.
+        for (int i = 0; i < 30; i++)
+            t.Feed("\n");
+
+        // Now scrollback has 5 content lines + some empty lines
+        Assert.True(t.Buffer.ScrollbackCount > 5,
+            $"Expected scrollback > 5, got {t.Buffer.ScrollbackCount}");
+
+        // EffectiveScrollbackCount should only count the non-empty lines
+        Assert.Equal(5, t.Buffer.EffectiveScrollbackCount);
+    }
+
+    [Fact]
+    public void SparseContent_AllEmptyScrollback_EffectiveCountIsZero()
+    {
+        var t = new TerminalTestHarness(40, 10);
+
+        // Just do line feeds to push empty rows into scrollback
+        for (int i = 0; i < 15; i++)
+            t.Feed("\n");
+
+        Assert.True(t.Buffer.ScrollbackCount > 0);
+        Assert.Equal(0, t.Buffer.EffectiveScrollbackCount);
+    }
+
+    [Fact]
+    public void SparseContent_MaxScrollOffset_ZeroWhenAllScrollbackEmpty()
+    {
+        var t = new TerminalTestHarness(40, 20);
+
+        // Write a few lines, then scroll to push empties
+        t.FeedLines("Hello", "World");
+        for (int i = 0; i < 25; i++)
+            t.Feed("\n");
+
+        int canvasRows = 20;
+        int effectiveMax = ViewportCalculator.MaxScrollOffset(
+            t.Buffer.Rows, canvasRows, t.Buffer.EffectiveScrollbackCount);
+
+        // With only 2 effective scrollback lines and 20 canvas rows,
+        // maxOffset should be small (2 + 20 - 20 = 2) but NOT include
+        // the empty trailing scrollback
+        Assert.True(effectiveMax <= 2,
+            $"Effective max scroll should be small, got {effectiveMax}");
+    }
+
+    [Fact]
+    public void SparseContent_ViewportShowsContentAtTop_AtScrollOffsetZero()
+    {
+        // When scrollOffset=0, the viewport should show the live screen.
+        // Content written to rows 0-4 should appear at viewRows 0-4.
+        var t = new TerminalTestHarness(40, 20);
+
+        t.FeedLines("Line1", "Line2", "Line3", "Line4", "Line5");
+
+        // Push 15 empty rows into scrollback by scrolling
+        for (int i = 0; i < 15; i++)
+            t.Feed("\n");
+
+        // At scrollOffset=0, the live screen should still have content
+        // (it was scrolled up, so screen is now empty with content in scrollback)
+        // This tests that GetVisibleCell at offset 0 shows the live screen
+        var rows = t.GetVisibleRows(0, 20);
+        // After scrolling 15+5=20 times on a 20-row terminal,
+        // the content was pushed to scrollback and screen is empty
+        // At scrollOffset=0 we see the (empty) live screen
+        // The point is: no rendering artifact places content at bottom
+
+        // Extra rows from compression should not pull empty scrollback lines
+        int effectiveScrollback = t.Buffer.EffectiveScrollbackCount;
+        int extraRows = ViewportCalculator.ExtraRowsFromCompression(
+            savedPixels: 200, cellHeight: 19, emptyRowScale: 0.35,
+            scrollbackCount: effectiveScrollback, viewOffset: 0, scrollOffset: 0);
+
+        // With effectiveScrollback=5, we might get some extra rows,
+        // but not from the empty trailing scrollback
+        int maxPossibleExtra = ViewportCalculator.ExtraRowsFromCompression(
+            savedPixels: 200, cellHeight: 19, emptyRowScale: 0.35,
+            scrollbackCount: t.Buffer.ScrollbackCount, viewOffset: 0, scrollOffset: 0);
+
+        Assert.True(extraRows <= effectiveScrollback,
+            $"Extra rows ({extraRows}) should not exceed effective scrollback ({effectiveScrollback}), " +
+            $"but would be {maxPossibleExtra} with full scrollback");
+    }
+
+    [Fact]
+    public void ComputeLayout_AlwaysBottomAligns()
+    {
+        var isEmpty = new bool[8]; // 8 rows, less than canvas capacity
+        double cellHeight = 19;
+        double canvasHeight = 40 * cellHeight; // space for 40 rows
+
+        var positions = RowLayoutCalculator.ComputeLayout(
+            isEmpty, cursorRow: 7, cellHeight, emptyRowScale: 0.35, canvasHeight);
+
+        // Last row ends at canvasHeight (bottom-aligned)
+        Assert.Equal(canvasHeight, positions[8]);
+        // First row starts offset from top
+        Assert.Equal(canvasHeight - 8 * cellHeight, positions[0]);
+    }
+
+    [Fact]
+    public void SparseContent_LayoutBottomAligned_WhenFull()
+    {
+        // When content fills or exceeds the canvas, keep bottom-alignment.
+        var isEmpty = new bool[40]; // exactly fills canvas
+        double cellHeight = 19;
+        double canvasHeight = 40 * cellHeight;
+
+        var positions = RowLayoutCalculator.ComputeLayout(
+            isEmpty, cursorRow: 39, cellHeight, emptyRowScale: 0.35, canvasHeight);
+
+        // Last row ends at canvas height (bottom-aligned)
+        Assert.Equal(canvasHeight, positions[40]);
+    }
+
+    [Fact]
+    public void SparseContent_SplitView_InteriorEmptyRowsCompressed()
+    {
+        // Regression: opening split view caused empty lines between content
+        // to appear at full height. ComputeLayout must bottom-align and
+        // compress interior empty rows so they don't show as gaps.
+        double cellHeight = 19;
+        double emptyRowScale = 0.35;
+        double emptyHeight = Math.Round(cellHeight * emptyRowScale);
+
+        // Simulate live pane in split: 15 visible rows, content at top
+        // and bottom with empty rows in between (rows 3-10 empty)
+        var isEmpty = new bool[15];
+        for (int i = 3; i <= 10; i++) isEmpty[i] = true;
+
+        var positions = RowLayoutCalculator.ComputeLayout(
+            isEmpty, cursorRow: 14, cellHeight, emptyRowScale, 15 * cellHeight);
+
+        // Bottom-aligned: last row ends at canvas height
+        Assert.Equal(15 * cellHeight, positions[15]);
+
+        // Interior empty rows should be compressed
+        for (int i = 3; i <= 10; i++)
+        {
+            double rowHeight = positions[i + 1] - positions[i];
+            Assert.Equal(emptyHeight, rowHeight);
+        }
+
+        // Non-empty rows should be full height
+        Assert.Equal(cellHeight, positions[1] - positions[0]);
+        Assert.Equal(cellHeight, positions[12] - positions[11]);
+    }
+
+    [Fact]
+    public void SparseContent_AllEmptyBeforeLastContent_Compressed()
+    {
+        // All empty rows before the last non-empty row are compressed,
+        // including leading empty rows. This keeps scrollback compact.
+        double cellHeight = 19;
+        double emptyRowScale = 0.35;
+        double emptyHeight = Math.Round(cellHeight * emptyRowScale);
+
+        // Rows 0-5 empty, rows 6-14 content
+        var isEmpty = new bool[15];
+        for (int i = 0; i <= 5; i++) isEmpty[i] = true;
+
+        var positions = RowLayoutCalculator.ComputeLayout(
+            isEmpty, cursorRow: 14, cellHeight, emptyRowScale, 15 * cellHeight);
+
+        // Empty rows before last content are compressed
+        for (int i = 0; i <= 5; i++)
+        {
+            double rowHeight = positions[i + 1] - positions[i];
+            Assert.Equal(emptyHeight, rowHeight);
+        }
     }
 }

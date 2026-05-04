@@ -170,6 +170,7 @@ public partial class TerminalView : UserControl
     private void OnCanvasSizeChanged(object sender, SizeChangedEventArgs e)
     {
         if (_vm == null) return;
+        if (_suppressResize) return;
 
         int cols = Canvas.Columns;
         int rows = Canvas.Rows;
@@ -544,6 +545,14 @@ public partial class TerminalView : UserControl
         if (isAlternate || maxOffset == 0)
         {
             VerticalScrollBar.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        int effectiveMax = ViewportCalculator.MaxScrollOffset(buffer.Rows, Canvas.Rows, buffer.EffectiveScrollbackCount);
+        if (effectiveMax == 0)
+        {
+            VerticalScrollBar.Visibility = Visibility.Collapsed;
+            _viewport.ScrollOffset = 0;
             return;
         }
 

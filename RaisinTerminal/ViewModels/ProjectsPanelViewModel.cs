@@ -427,7 +427,7 @@ public partial class ProjectsPanelViewModel : ViewModelBase
                 && DateTime.UtcNow - lastRun < TimeSpan.FromSeconds(4))
             {
                 var screenStatus = ClaudeScreenStateClassifier.Classify(
-                    row => session.ReadScreenLine(row), session.CursorRow, session.ScreenRows);
+                    row => session.ReadScreenLineBrightOnly(row), session.CursorRow, session.ScreenRows);
                 return screenStatus is TerminalStatus.Idle or TerminalStatus.AgentsRunning
                     ? TerminalStatus.Working : screenStatus;
             }
@@ -442,7 +442,7 @@ public partial class ProjectsPanelViewModel : ViewModelBase
         // status bar updates that would keep LastOutputTime permanently fresh
         if (string.Equals(childName, "claude", StringComparison.OrdinalIgnoreCase))
             return ClaudeScreenStateClassifier.Classify(
-                row => session.ReadScreenLine(row), session.CursorRow, session.ScreenRows);
+                row => session.ReadScreenLineBrightOnly(row), session.CursorRow, session.ScreenRows);
 
         if (session.IsInAlternateScreen)
             return TerminalStatus.WaitingForInput;

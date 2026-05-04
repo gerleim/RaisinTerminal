@@ -235,14 +235,15 @@ public class TerminalBuffer
     }
 
     /// <summary>
-    /// Discards all deferred scrollback rows. Called at TUI frame start so that
-    /// only the latest frame's overflow survives — prevents duplicates across
-    /// successive redraws.
+    /// Commits deferred scrollback from the previous frame, then resets for
+    /// the new frame. Called at TUI frame start (CUP 1;1). The flush uses
+    /// content-based dedup so identical rows from successive redraws are not
+    /// duplicated; unique content (e.g. streaming output that scrolled off
+    /// during the previous frame) is preserved.
     /// </summary>
     public void ClearDeferredScrollback()
     {
-        _deferredScrollback.Clear();
-        _deferredScrollbackWrapped.Clear();
+        FlushDeferredScrollback();
     }
 
     /// <summary>
@@ -254,10 +255,12 @@ public class TerminalBuffer
     {
         if (_deferredScrollback.Count == 0) return;
 
-        // Skip leading deferred rows that already exist at the tail of real
-        // scrollback (identical TUI redraws produce the same overflow). Uses
-        // content comparison so streaming output between frames doesn't cause
-        // non-duplicate rows to be incorrectly skipped.
+        // Skip deferred rows that already exist in real scrollback (identical
+        // TUI redraws produce the same overflow). Two strategies:
+        // 1. From-start: deferred rows match the start of the committed region
+        //    (handles successive TUI redraws where each frame overflows the same rows).
+        // 2. Tail-match: deferred rows match the last N rows of scrollback
+        //    (handles resize-push + redraw where pushed rows are a superset of deferred).
         int alreadyCommitted = _scrollback.Count - _scrollbackCountAtDeferStart;
         int skip = 0;
         int maxSkip = Math.Clamp(alreadyCommitted, 0, _deferredScrollback.Count);
@@ -268,6 +271,25 @@ public class TerminalBuffer
                 skip++;
             else
                 break;
+        }
+
+        if (skip == 0 && _deferredScrollback.Count > 0
+            && _scrollback.Count >= _deferredScrollback.Count)
+        {
+            int tailStart = _scrollback.Count - _deferredScrollback.Count;
+            if (tailStart >= _scrollbackCountAtDeferStart)
+            {
+                int tailSkip = 0;
+                for (int i = 0; i < _deferredScrollback.Count; i++)
+                {
+                    if (RowsEqual(_scrollback[tailStart + i], _deferredScrollback[i]))
+                        tailSkip++;
+                    else
+                        break;
+                }
+                if (tailSkip == _deferredScrollback.Count)
+                    skip = tailSkip;
+            }
         }
 
         for (int i = skip; i < _deferredScrollback.Count; i++)
@@ -518,6 +540,31 @@ public class TerminalBuffer
     }
 
     public CellData[] GetScrollbackLine(int index) => _scrollback[index];
+
+    public bool IsScrollbackLineEmpty(int index)
+    {
+        if (index < 0 || index >= _scrollback.Count) return true;
+        var line = _scrollback[index];
+        for (int c = 0; c < line.Length; c++)
+        {
+            if (line[c].Character != ' ' && line[c].Character != '\0')
+                return false;
+        }
+        return true;
+    }
+
+    public int EffectiveScrollbackCount
+    {
+        get
+        {
+            for (int i = _scrollback.Count - 1; i >= 0; i--)
+            {
+                if (!IsScrollbackLineEmpty(i))
+                    return i + 1;
+            }
+            return 0;
+        }
+    }
 
     /// <summary>
     /// Reads the text content of a scrollback line as a string.
