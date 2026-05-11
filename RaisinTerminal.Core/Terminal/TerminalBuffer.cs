@@ -227,6 +227,7 @@ public class TerminalBuffer
         _deferredScrollback.Clear();
         _deferredScrollbackWrapped.Clear();
         _resizePushCount = 0;
+        _scrollbackCountAtDeferStart = 0;
         foreach (var vp in Viewports)
         {
             vp.ScrollOffset = 0;
@@ -244,6 +245,42 @@ public class TerminalBuffer
     public void ClearDeferredScrollback()
     {
         FlushDeferredScrollback();
+    }
+
+    /// <summary>
+    /// Removes trailing scrollback entries that duplicate current screen content.
+    /// Called once after Claude's first TUI frame is drawn: content that scrolled
+    /// into scrollback during the initial draw (before ClaudeRedrawSuppression was
+    /// enabled) is now also on screen from the cursor-home redraw.
+    /// </summary>
+    public void RemoveTrailingScrollbackDuplicates()
+    {
+        if (_scrollback.Count == 0) return;
+
+        var screenRows = new HashSet<string>();
+        for (int r = 0; r < Rows; r++)
+        {
+            string text = GetScreenLineText(r).TrimEnd();
+            if (text.Length > 0)
+                screenRows.Add(text);
+        }
+        if (screenRows.Count == 0) return;
+
+        int removeCount = 0;
+        for (int i = _scrollback.Count - 1; i >= 0; i--)
+        {
+            string text = GetScrollbackLineText(i).TrimEnd();
+            if (text.Length > 0 && screenRows.Contains(text))
+                removeCount++;
+            else
+                break;
+        }
+
+        if (removeCount > 0)
+        {
+            _scrollback.RemoveNewest(removeCount);
+            _scrollbackWrapped.RemoveNewest(removeCount);
+        }
     }
 
     /// <summary>

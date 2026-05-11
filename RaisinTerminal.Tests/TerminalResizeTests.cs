@@ -681,6 +681,195 @@ public class Level5_ClaudeSuppressionTests
         Assert.True(t.Buffer.ScrollbackCount > before,
             "Post-restart first frame must flow to scrollback");
     }
+
+    [Fact]
+    public void ClaudeSuppression_ClearScrollbackThenRedraw_NoDuplicates()
+    {
+        // Reproduces: user issues /clear during Claude session. ClearScrollback()
+        // wipes the scrollback but _scrollbackCountAtDeferStart stays stale at the
+        // old value (captured when Claude first started, with cmd prompt lines
+        // already in scrollback). The stale value makes FlushDeferredScrollback's
+        // from-start dedup check the wrong position and its tail-match guard
+        // (tailStart >= _scrollbackCountAtDeferStart) reject valid matches,
+        // causing identical TUI frame overflow to be committed as duplicates.
+        var t = new TerminalTestHarness(20, 4);
+
+        // Simulate cmd prompt output before Claude starts — enough to overflow
+        // so _scrollbackCountAtDeferStart captures a non-zero value
+        t.FeedLines("Windows 10", "Copyright MS", "C:\\>claude", "Loading...", "Ready");
+
+        // Claude starts — captures _scrollbackCountAtDeferStart = _scrollback.Count
+        t.SetClaudeRedrawSuppression(true);
+
+        // Initial Claude frames: content overflows to scrollback
+        t.CursorHome().FeedLines("H0", "H1", "H2", "H3", "H4", "H5");
+        t.CursorHome().FeedLines("H0", "H1", "H2", "H3", "H4", "H5");
+        int preClear = t.Buffer.ScrollbackCount;
+        Assert.True(preClear >= 2, "Pre-clear scrollback should exist");
+
+        // Simulate /clear: wipe scrollback and re-arm suppression
+        t.Buffer.ClearScrollback();
+        t.Emulator.BeginScrollbackSuppressionForRedraw();
+        Assert.Equal(0, t.Buffer.ScrollbackCount);
+
+        // Claude redraws after /clear (frame 1) — ED 2 + CUP 1;1 + content
+        t.EraseDisplay(2).CursorHome()
+         .FeedLines("HDR0", "HDR1", "HDR2", "HDR3", "PROMPT");
+
+        // Frame 2: ED 2 flushes frame 1's deferred, then redraws same content
+        t.EraseDisplay(2).CursorHome()
+         .FeedLines("HDR0", "HDR1", "HDR2", "HDR3", "PROMPT");
+        int afterFrame2 = t.Buffer.ScrollbackCount;
+
+        // Frame 3: identical — must NOT grow scrollback
+        t.EraseDisplay(2).CursorHome()
+         .FeedLines("HDR0", "HDR1", "HDR2", "HDR3", "PROMPT");
+        int afterFrame3 = t.Buffer.ScrollbackCount;
+
+        // Frame 4: identical — must NOT grow scrollback
+        t.EraseDisplay(2).CursorHome()
+         .FeedLines("HDR0", "HDR1", "HDR2", "HDR3", "PROMPT");
+        int afterFrame4 = t.Buffer.ScrollbackCount;
+
+        Assert.Equal(afterFrame2, afterFrame3);
+        Assert.Equal(afterFrame2, afterFrame4);
+
+        t.AssertNoDuplicateScrollback();
+    }
+
+    [Fact]
+    public void ClaudeSuppression_RestoreAfterSync_KeepsSuppressActive()
+    {
+        var t = new TerminalTestHarness(20, 5);
+        t.SetClaudeRedrawSuppression(true);
+
+        // Frame 1: initial render (skip first CUP suppress)
+        t.CursorHome().FeedLines("A", "B", "C", "D", "E", "F", "G");
+
+        // Frame 2: steady-state (activates suppression)
+        t.CursorHome().FeedLines("A", "B", "C", "D", "E", "F", "G");
+        Assert.True(t.Buffer.SuppressScrollback, "Suppression should be active in steady-state");
+
+        // Sync block
+        t.SyncBegin();
+        t.CursorHome().FeedLines("A", "B", "C", "D", "E", "F", "G");
+        t.SyncEnd();
+
+        // RestoreScrollbackAfterSync must NOT release suppression while
+        // ClaudeRedrawSuppression is active — releasing opens a window
+        // where inter-frame LFs leak screen rows into real scrollback,
+        // breaking tail-match dedup and causing duplication.
+        t.Emulator.RestoreScrollbackAfterSync();
+        Assert.True(t.Buffer.SuppressScrollback,
+            "SuppressScrollback must remain active while ClaudeRedrawSuppression is on");
+    }
+
+    [Fact]
+    public void ClaudeSuppression_RestoreAfterSync_DoesNotLeakDuplicates()
+    {
+        // Without the fix, RestoreScrollbackAfterSync releases SuppressScrollback
+        // while Claude's TUI is active. The next CUP 1;1 re-enables it, but the
+        // old deferred (from the sync frame) is flushed with suppress OFF —
+        // meaning rows can leak to real scrollback between the restore and the
+        // CUP. With changed content (A→X), from-start dedup fails (scrollback[0]=A
+        // vs X) and tail-match may fail depending on what leaked. Over many
+        // sync cycles, this compounds into visible duplication.
+        var t = new TerminalTestHarness(20, 5);
+        t.SetClaudeRedrawSuppression(true);
+
+        // Frame 1: initial render (skip first CUP suppress)
+        t.CursorHome().FeedLines("A", "B", "C", "D", "E", "F", "G");
+
+        // Frame 2: steady-state (activates suppression)
+        t.CursorHome().FeedLines("A", "B", "C", "D", "E", "F", "G");
+
+        // Content changes (new response)
+        t.CursorHome().FeedLines("X", "Y", "Z", "W", "V", "U", "T");
+        t.CursorHome().FeedLines("X", "Y", "Z", "W", "V", "U", "T");
+        int baseline = t.Buffer.ScrollbackCount;
+
+        // Multiple sync-restore cycles — each cycle risks leaking duplicates
+        // if suppression is incorrectly released between sync end and next CUP
+        for (int cycle = 0; cycle < 5; cycle++)
+        {
+            t.SyncBegin();
+            t.CursorHome().FeedLines("X", "Y", "Z", "W", "V", "U", "T");
+            t.SyncEnd();
+            t.Emulator.RestoreScrollbackAfterSync();
+            t.CursorHome().FeedLines("X", "Y", "Z", "W", "V", "U", "T");
+        }
+
+        int afterCycles = t.Buffer.ScrollbackCount;
+
+        var sb = t.GetAllScrollbackLines();
+        var info = $"baseline={baseline} afterCycles={afterCycles}\n" +
+                   string.Join("\n", sb.Select((l, i) => $"  [{i}] {l}"));
+
+        Assert.True(afterCycles == baseline,
+            $"Sync-restore cycles with stable content must not grow scrollback.\n{info}");
+    }
+
+    [Fact]
+    public void NewSession_InitialScrollbackSurvivesRedraw_NoDuplicateInfoLines()
+    {
+        // Reproduces: new session on a small terminal (5 rows). The cmd.exe
+        // startup + Claude initial banner draw causes content to scroll off
+        // into scrollback. When ClaudeRedrawSuppression is later enabled and
+        // Claude redraws from cursor home, the old scrollback entries remain
+        // untouched, duplicating the version/model lines that now appear on
+        // the fresh screen as well.
+        var t = new TerminalTestHarness(80, 5);
+
+        // Phase 1: cmd.exe startup output
+        t.Feed("Windows Version 10.0\r\n")
+         .Feed("(c) Acme Corp.\r\n");
+        t.CursorTo(4, 1)
+         .Feed("C:\\Projects>app --name \"P1\"\r\n");
+
+        // Phase 2: app initial draw — cursor is at last row, each \r\n scrolls
+        t.Feed("App v2.1.119\r\n")
+         .Feed("Opus 4.6 medium\r\n")
+         .Feed("C:\\Projects\r\n")
+         .Feed("────────\r\n")
+         .Feed("> prompt\r\n")
+         .Feed("────────\r\n")
+         .Feed("status");
+
+        // Scrollback now contains version + model lines from the initial draw
+
+        // Phase 3: app detected, suppression enabled
+        t.SetClaudeRedrawSuppression(true);
+
+        // Phase 4: TUI redraw from cursor home
+        t.EraseDisplay(2)
+         .CursorHome()
+         .Feed("App v2.1.119\r\n")
+         .Feed("Opus 4.6 medium\r\n")
+         .Feed("C:\\Projects\r\n")
+         .Feed("────────\r\n")
+         .Feed("> prompt");
+
+        // Screen should show the fresh content
+        t.AssertScreenRow(0, "App v2.1.119");
+        t.AssertScreenRow(1, "Opus 4.6 medium");
+        t.AssertScreenRow(2, "C:\\Projects");
+
+        // Total content must not duplicate the info lines
+        var total = t.GetAllScrollbackLines()
+                     .Concat(t.GetAllScreenRows())
+                     .ToArray();
+        int versionCount = total.Count(l => l == "App v2.1.119");
+        int modelCount = total.Count(l => l == "Opus 4.6 medium");
+
+        Assert.True(versionCount == 1,
+            $"'App v2.1.119' appears {versionCount} times in total content (expected 1).\n" +
+            $"Scrollback: {string.Join(" | ", t.GetAllScrollbackLines().Select(l => $"\"{l}\""))}\n" +
+            $"Screen: {string.Join(" | ", t.GetAllScreenRows().Select(l => $"\"{l}\""))}");
+        Assert.True(modelCount == 1,
+            $"'Opus 4.6 medium' appears {modelCount} times in total content (expected 1).\n" +
+            $"Scrollback: {string.Join(" | ", t.GetAllScrollbackLines().Select(l => $"\"{l}\""))}\n" +
+            $"Screen: {string.Join(" | ", t.GetAllScreenRows().Select(l => $"\"{l}\""))}");
+    }
 }
 
 // ============================================================================

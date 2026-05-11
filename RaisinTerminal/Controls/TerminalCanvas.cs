@@ -159,7 +159,7 @@ public partial class TerminalCanvas : FrameworkElement
         int baseRowCount = ViewportCalculator.BaseRowCount(buffer.Rows, Rows);
         int viewOffset = ViewportCalculator.ViewOffset(buffer.Rows, Rows);
 
-        int displayCursorRow = ViewportCalculator.DisplayCursorRow(buffer.CursorRow, viewOffset);
+        int displayCursorRow = ViewportCalculator.DisplayCursorRow(buffer.CursorRow, viewOffset) + scrollOffset;
         if (!(Emulator?.CursorEnabled ?? true))
             displayCursorRow = FindVisualCursorRow(buffer, baseRowCount, scrollOffset);
 
@@ -198,27 +198,39 @@ public partial class TerminalCanvas : FrameworkElement
 
             if (extraRows > 0 && buffer.ScrollbackCount > 0)
             {
-                // Extra rows display the newest N scrollback lines. If the
-                // newest scrollback line is empty (e.g., empty rows pushed by
-                // scrolling), don't show extra rows — they'd just add blank
-                // space above the content.
-                int newestSb = buffer.ScrollbackCount - 1;
-                if (buffer.IsScrollbackLineEmpty(newestSb))
-                    extraRows = 0;
+                // Extra rows show the newest N scrollback lines. If the
+                // tail of scrollback is empty, limit to meaningful lines
+                // so we show content, not blank rows.
+                int effectiveSb = buffer.EffectiveScrollbackCount;
+                int maxFromSb = Math.Max(0, effectiveSb + viewOffset - scrollOffset);
+                if (extraRows > maxFromSb)
+                    extraRows = maxFromSb;
             }
 
-            if (extraRows == 0 && (topAnchor || displayedBaseRows < baseRowCount))
+            // Check if the screen's bottom row has content — indicates the
+            // buffer was fully filled at scrollOffset=0 and layout should
+            // stay bottom-aligned even when scrolling causes trailing rows
+            // to appear empty in the viewport.
+            bool screenBottomHasContent = false;
+            if (displayedBaseRows < baseRowCount && !topAnchor)
+            {
+                for (int c = 0; c < buffer.Columns; c++)
+                {
+                    var ch = buffer.GetCell(buffer.Rows - 1, c).Character;
+                    if (ch != ' ' && ch != '\0' && ch != '│')
+                    { screenBottomHasContent = true; break; }
+                }
+            }
+
+            if (extraRows == 0 && (topAnchor
+                || (displayedBaseRows < baseRowCount && !screenBottomHasContent)))
             {
                 rowYPositions = basePositions;
             }
-            else if (extraRows == 0 && displayedBaseRows == baseRowCount)
+            else if (extraRows == 0)
             {
-                // Full buffer, no scrollback to fill compression gaps.
-                // Use uniform row height — compression would create a gap
-                // at top with nothing to fill it.
-                var noCompression = new bool[baseRowCount];
                 rowYPositions = RowLayoutCalculator.ComputeLayout(
-                    noCompression, displayCursorRow, _cellHeight, EmptyRowScale, ActualHeight);
+                    baseIsEmpty, displayCursorRow, _cellHeight, EmptyRowScale, ActualHeight);
             }
             else
             {
@@ -245,7 +257,7 @@ public partial class TerminalCanvas : FrameworkElement
                             allIsEmpty, adjustedCursorRow, _cellHeight, EmptyRowScale);
                     }
 
-                    int maxAvailable = Math.Max(0, buffer.ScrollbackCount + viewOffset - scrollOffset);
+                    int maxAvailable = Math.Max(0, buffer.EffectiveScrollbackCount + viewOffset - scrollOffset);
                     while (extraRows < maxAvailable && rowYPositions[totalCandidateRows] + _cellHeight <= ActualHeight)
                     {
                         extraRows++;
@@ -293,6 +305,23 @@ public partial class TerminalCanvas : FrameworkElement
                 int adjCursor = displayCursorRow + extraRows;
                 rowYPositions = RowLayoutCalculator.ComputeRowYPositions(
                     allIsEmpty2, adjCursor, _cellHeight, EmptyRowScale);
+            }
+
+            // When the screen is fully filled (bottom row has content) and
+            // there are no extra scrollback rows to fill compression gaps,
+            // the layout at scrollOffset=0 is bottom-aligned. Scrolling up
+            // can shift trailing rows into "empty" territory, switching to
+            // a top-aligned code path. Shift content down to stay anchored.
+            if (screenBottomHasContent && extraRows == 0)
+            {
+                int total = displayedBaseRows + extraRows;
+                double contentBottom = rowYPositions[total];
+                if (contentBottom < ActualHeight)
+                {
+                    double shift = ActualHeight - contentBottom;
+                    for (int i = 0; i <= total; i++)
+                        rowYPositions[i] += shift;
+                }
             }
         }
         else
@@ -485,8 +514,6 @@ public partial class TerminalCanvas : FrameworkElement
             var cell = GetDisplayCell(buffer, displayRow, c, extraRows, scrollOffset, baseRowCount);
             if (cell.Character != ' ' && cell.Character != '\0' && cell.Character != '\u2502')
                 return false;
-            if (cell.BackgroundR != CellData.DefaultBgR || cell.BackgroundG != CellData.DefaultBgG || cell.BackgroundB != CellData.DefaultBgB)
-                return false;
         }
         return true;
     }
@@ -498,8 +525,6 @@ public partial class TerminalCanvas : FrameworkElement
         {
             var cell = buffer.GetVisibleCell(row, c, scrollOffset, baseRowCount);
             if (cell.Character != ' ' && cell.Character != '\0' && cell.Character != '\u2502')
-                return false;
-            if (cell.BackgroundR != CellData.DefaultBgR || cell.BackgroundG != CellData.DefaultBgG || cell.BackgroundB != CellData.DefaultBgB)
                 return false;
         }
         return true;

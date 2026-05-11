@@ -74,6 +74,7 @@ public partial class TerminalEmulator : IDisposable
             // and drop active suppression so shell output flows normally.
             if (!value)
             {
+                _deduplicateScrollbackPending = false;
                 Buffer.FlushDeferredScrollback();
                 Buffer.DeferScrollbackOnSuppress = false;
                 if (_syncRedrawSuppressScrollback &&
@@ -88,6 +89,7 @@ public partial class TerminalEmulator : IDisposable
     private bool _claudeRedrawSuppression;
     private bool _skipNextCursorHomeSuppress;
     private bool _resizeGrace;
+    private bool _deduplicateScrollbackPending;
 
     /// <summary>
     /// When set, printed characters and newlines are written to the transcript log.
@@ -217,6 +219,8 @@ public partial class TerminalEmulator : IDisposable
     {
         _parser.Feed(data);
         _resizeGrace = false;
+        if (_deduplicateScrollbackPending)
+            Buffer.RemoveTrailingScrollbackDuplicates();
         BufferChanged?.Invoke();
         if (!_disposed)
             _idleSnapshotTimer.Change(IdleSnapshotMs, System.Threading.Timeout.Infinite);
@@ -284,6 +288,8 @@ public partial class TerminalEmulator : IDisposable
     {
         if (_syncRedrawSuppressScrollback)
         {
+            if (ClaudeRedrawSuppression)
+                return;
             _syncRedrawSuppressScrollback = false;
             if (!AlternateScreen)
                 Buffer.SuppressScrollback = false;

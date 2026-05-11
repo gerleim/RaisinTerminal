@@ -148,6 +148,7 @@ public partial class TerminalEmulator
                         // New frame: discard previous frame's deferred overflow so
                         // only the latest frame's rows survive (prevents duplicates).
                         Buffer.ClearDeferredScrollback();
+                        _deduplicateScrollbackPending = false;
 
                         if (!_syncRedrawSuppressScrollback)
                         {
@@ -163,6 +164,7 @@ public partial class TerminalEmulator
                             {
                                 _syncRedrawSuppressScrollback = true;
                                 Buffer.SuppressScrollback = true;
+                                _deduplicateScrollbackPending = true;
                             }
                         }
                     }
@@ -295,6 +297,7 @@ public partial class TerminalEmulator
                     {
                         _syncRedrawSuppressScrollback = true;
                         Buffer.SuppressScrollback = true;
+                        _deduplicateScrollbackPending = true;
                     }
                 }
                 EraseCells(0, 0, Buffer.Rows - 1, Buffer.Columns - 1, fill);

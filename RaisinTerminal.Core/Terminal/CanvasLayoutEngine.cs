@@ -24,6 +24,7 @@ public static class CanvasLayoutEngine
 
         int extraRows = 0;
         int displayedBaseRows = baseRowCount;
+        displayCursorRow += scrollOffset;
 
         var baseIsEmpty = new bool[baseRowCount];
         int lastMeaningful = -1;
@@ -52,9 +53,10 @@ public static class CanvasLayoutEngine
 
         if (extraRows > 0 && buffer.ScrollbackCount > 0)
         {
-            int newestSb = buffer.ScrollbackCount - 1;
-            if (buffer.IsScrollbackLineEmpty(newestSb))
-                extraRows = 0;
+            int effectiveSb = buffer.EffectiveScrollbackCount;
+            int maxFromSb = Math.Max(0, effectiveSb + viewOffset - scrollOffset);
+            if (extraRows > maxFromSb)
+                extraRows = maxFromSb;
         }
 
         double[] rowYPositions;
@@ -92,7 +94,7 @@ public static class CanvasLayoutEngine
                         allIsEmpty, adjustedCursorRow, cellHeight, emptyRowScale);
                 }
 
-                int maxAvailable = Math.Max(0, buffer.ScrollbackCount + viewOffset - scrollOffset);
+                int maxAvailable = Math.Max(0, buffer.EffectiveScrollbackCount + viewOffset - scrollOffset);
                 while (extraRows < maxAvailable && rowYPositions[totalCandidateRows] + cellHeight <= canvasHeight)
                 {
                     extraRows++;
@@ -169,8 +171,6 @@ public static class CanvasLayoutEngine
             var cell = buffer.GetVisibleCell(displayRow, c, scrollOffset, baseRowCount + extraRows);
             if (cell.Character != ' ' && cell.Character != '\0' && cell.Character != '│')
                 return false;
-            if (cell.BackgroundR != CellData.DefaultBgR || cell.BackgroundG != CellData.DefaultBgG || cell.BackgroundB != CellData.DefaultBgB)
-                return false;
         }
         return true;
     }
@@ -182,8 +182,6 @@ public static class CanvasLayoutEngine
         {
             var cell = buffer.GetVisibleCell(row, c, scrollOffset, baseRowCount);
             if (cell.Character != ' ' && cell.Character != '\0' && cell.Character != '│')
-                return false;
-            if (cell.BackgroundR != CellData.DefaultBgR || cell.BackgroundG != CellData.DefaultBgG || cell.BackgroundB != CellData.DefaultBgB)
                 return false;
         }
         return true;
