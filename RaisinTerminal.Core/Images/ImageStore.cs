@@ -5,6 +5,7 @@ namespace RaisinTerminal.Core.Images;
 /// </summary>
 public class ImageStore
 {
+    private static readonly object _saveLock = new();
     private readonly string _baseDirectory;
 
     public ImageStore(string baseDirectory)
@@ -15,10 +16,23 @@ public class ImageStore
 
     public string SaveImage(byte[] imageData, string extension = ".png")
     {
-        var fileName = $"{DateTime.UtcNow:yyyyMMdd_HHmmss_fff}{extension}";
-        var path = Path.Combine(_baseDirectory, fileName);
-        File.WriteAllBytes(path, imageData);
-        return path;
+        lock (_saveLock)
+        {
+            var baseName = $"{DateTime.UtcNow:yyyyMMdd_HHmmss_fff}";
+            var fileName = $"{baseName}{extension}";
+            var path = Path.Combine(_baseDirectory, fileName);
+
+            int counter = 2;
+            while (File.Exists(path))
+            {
+                fileName = $"{baseName}_{counter}{extension}";
+                path = Path.Combine(_baseDirectory, fileName);
+                counter++;
+            }
+
+            File.WriteAllBytes(path, imageData);
+            return path;
+        }
     }
 
     public IEnumerable<string> GetAllImages()

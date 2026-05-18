@@ -26,6 +26,11 @@ public static class CanvasLayoutEngine
         int displayedBaseRows = baseRowCount;
         displayCursorRow += scrollOffset;
 
+        // Never exempt any row from compression based on cursor position.
+        // All interior empty rows compress uniformly, preventing visual
+        // jitter when scrollOffset changes the cursor's display position.
+        const int compressionCursorRow = int.MinValue;
+
         var baseIsEmpty = new bool[baseRowCount];
         int lastMeaningful = -1;
         for (int row = 0; row < baseRowCount; row++)
@@ -42,7 +47,7 @@ public static class CanvasLayoutEngine
             : baseIsEmpty[..displayedBaseRows];
 
         var basePositions = RowLayoutCalculator.ComputeRowYPositions(
-            trimmedEmpty, displayCursorRow, cellHeight, emptyRowScale);
+            trimmedEmpty, compressionCursorRow, cellHeight, emptyRowScale);
 
         {
             double savedPixels = canvasHeight - basePositions[displayedBaseRows];
@@ -67,31 +72,26 @@ public static class CanvasLayoutEngine
         }
         else if (extraRows == 0 && displayedBaseRows == baseRowCount)
         {
-            // Full buffer, no scrollback to fill compression gaps.
-            // Bottom-align with compression — interior empties compress,
-            // the gap appears at top which is fine for a bottom-anchored view.
             rowYPositions = RowLayoutCalculator.ComputeLayout(
-                baseIsEmpty, displayCursorRow, cellHeight, emptyRowScale, canvasHeight);
+                baseIsEmpty, compressionCursorRow, cellHeight, emptyRowScale, canvasHeight);
         }
         else
         {
             int totalCandidateRows = displayedBaseRows + extraRows;
             var allIsEmpty = BuildEmptyArray(buffer, totalCandidateRows, extraRows, scrollOffset, baseRowCount);
 
-            int adjustedCursorRow = displayCursorRow + extraRows;
             if (topAnchor || baseRowCount < canvasRows || displayedBaseRows < baseRowCount)
             {
                 rowYPositions = RowLayoutCalculator.ComputeRowYPositions(
-                    allIsEmpty, adjustedCursorRow, cellHeight, emptyRowScale);
+                    allIsEmpty, compressionCursorRow, cellHeight, emptyRowScale);
 
                 while (extraRows > 0 && rowYPositions[totalCandidateRows] > canvasHeight)
                 {
                     extraRows--;
                     totalCandidateRows = displayedBaseRows + extraRows;
                     allIsEmpty = BuildEmptyArray(buffer, totalCandidateRows, extraRows, scrollOffset, baseRowCount);
-                    adjustedCursorRow = displayCursorRow + extraRows;
                     rowYPositions = RowLayoutCalculator.ComputeRowYPositions(
-                        allIsEmpty, adjustedCursorRow, cellHeight, emptyRowScale);
+                        allIsEmpty, compressionCursorRow, cellHeight, emptyRowScale);
                 }
 
                 int maxAvailable = Math.Max(0, buffer.EffectiveScrollbackCount + viewOffset - scrollOffset);
@@ -100,17 +100,15 @@ public static class CanvasLayoutEngine
                     extraRows++;
                     totalCandidateRows = displayedBaseRows + extraRows;
                     allIsEmpty = BuildEmptyArray(buffer, totalCandidateRows, extraRows, scrollOffset, baseRowCount);
-                    adjustedCursorRow = displayCursorRow + extraRows;
                     rowYPositions = RowLayoutCalculator.ComputeRowYPositions(
-                        allIsEmpty, adjustedCursorRow, cellHeight, emptyRowScale);
+                        allIsEmpty, compressionCursorRow, cellHeight, emptyRowScale);
                     if (rowYPositions[totalCandidateRows] > canvasHeight)
                     {
                         extraRows--;
                         totalCandidateRows = displayedBaseRows + extraRows;
                         allIsEmpty = BuildEmptyArray(buffer, totalCandidateRows, extraRows, scrollOffset, baseRowCount);
-                        adjustedCursorRow = displayCursorRow + extraRows;
                         rowYPositions = RowLayoutCalculator.ComputeRowYPositions(
-                            allIsEmpty, adjustedCursorRow, cellHeight, emptyRowScale);
+                            allIsEmpty, compressionCursorRow, cellHeight, emptyRowScale);
                         break;
                     }
                 }
@@ -118,7 +116,7 @@ public static class CanvasLayoutEngine
             else
             {
                 rowYPositions = RowLayoutCalculator.ComputeLayout(
-                    allIsEmpty, adjustedCursorRow, cellHeight, emptyRowScale, canvasHeight);
+                    allIsEmpty, compressionCursorRow, cellHeight, emptyRowScale, canvasHeight);
             }
         }
 
@@ -133,9 +131,8 @@ public static class CanvasLayoutEngine
             displayedBaseRows++;
             total = displayedBaseRows + extraRows;
             var allIsEmpty2 = BuildEmptyArray(buffer, total, extraRows, scrollOffset, baseRowCount);
-            int adjCursor = displayCursorRow + extraRows;
             rowYPositions = RowLayoutCalculator.ComputeRowYPositions(
-                allIsEmpty2, adjCursor, cellHeight, emptyRowScale);
+                allIsEmpty2, compressionCursorRow, cellHeight, emptyRowScale);
         }
 
         // After restoring trailing rows, if content still doesn't fill the

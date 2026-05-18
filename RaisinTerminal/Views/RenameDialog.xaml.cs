@@ -21,7 +21,7 @@ public partial class RenameDialog : Window
         ExtensionText.Text = _extension;
         NameBox.Text = nameWithoutExt;
         NameBox.SelectAll();
-        NameBox.Focus();
+        Loaded += (_, _) => NameBox.Focus();
     }
 
     private void OnOk(object sender, RoutedEventArgs e)

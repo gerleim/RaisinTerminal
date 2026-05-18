@@ -80,12 +80,16 @@ public partial class MainWindow : Window
 
     private async void CheckForAppUpdateAsync()
     {
-        var info = await AppUpdateService.CheckForUpdateAsync();
-        if (info.IsUpdateAvailable)
+        try
         {
-            var window = new AppUpdateWindow(info) { Owner = this };
-            window.ShowDialog();
+            var info = await AppUpdateService.CheckForUpdateAsync();
+            if (info.IsUpdateAvailable)
+            {
+                var window = new AppUpdateWindow(info) { Owner = this };
+                window.ShowDialog();
+            }
         }
+        catch { }
     }
 
     /// <summary>
@@ -138,10 +142,10 @@ public partial class MainWindow : Window
     protected override void OnClosing(CancelEventArgs e)
     {
         _viewModel.ProjectsPanel.StopTimer();
-        _viewModel.Dispose();
         LayoutService.SaveLayout(DockingManager, _viewModel, this);
         SettingsService.Save(SettingsService.Current);
         SessionDimensionsService.Save(_viewModel.Documents.Select(d => d.ContentId));
+        _viewModel.Dispose();
         base.OnClosing(e);
     }
 

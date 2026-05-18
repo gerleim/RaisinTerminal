@@ -204,8 +204,9 @@ public partial class ProjectsPanelViewModel : ViewModelBase
                 unmatched.Add(session);
             }
 
-            // Set up PasteImage callback on each session
-            SetupPasteImageHandler(session);
+            // Set up PasteImage callback on each session (only if not already set)
+            if (session.PasteImage == null)
+                SetupPasteImageHandler(session);
         }
 
         // Update project nodes

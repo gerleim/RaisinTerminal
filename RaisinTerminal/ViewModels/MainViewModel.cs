@@ -337,21 +337,25 @@ public class MainViewModel : ViewModelBase, IDisposable
 
     private static async void CheckForAppUpdate()
     {
-        var info = await Services.AppUpdateService.CheckForUpdateAsync();
-        if (info.IsUpdateAvailable)
+        try
         {
-            var window = new Views.AppUpdateWindow(info);
-            window.Owner = System.Windows.Application.Current.MainWindow;
-            window.ShowDialog();
+            var info = await Services.AppUpdateService.CheckForUpdateAsync();
+            if (info.IsUpdateAvailable)
+            {
+                var window = new Views.AppUpdateWindow(info);
+                window.Owner = System.Windows.Application.Current.MainWindow;
+                window.ShowDialog();
+            }
+            else
+            {
+                System.Windows.MessageBox.Show(
+                    $"You are running the latest version ({Services.AppUpdateService.GetCurrentVersion().ToString(3)}).",
+                    "Check for Updates",
+                    System.Windows.MessageBoxButton.OK,
+                    System.Windows.MessageBoxImage.Information);
+            }
         }
-        else
-        {
-            System.Windows.MessageBox.Show(
-                $"You are running the latest version ({Services.AppUpdateService.GetCurrentVersion().ToString(3)}).",
-                "Check for Updates",
-                System.Windows.MessageBoxButton.OK,
-                System.Windows.MessageBoxImage.Information);
-        }
+        catch { }
     }
 
     private static void ShowClaudeCodeUpdate()
@@ -371,6 +375,11 @@ public class MainViewModel : ViewModelBase, IDisposable
     public void Dispose()
     {
         KeyBindingsService.BindingsChanged -= OnKeyBindingsChanged;
+        foreach (var doc in Documents)
+        {
+            if (doc is TerminalSessionViewModel session)
+                session.OnClose();
+        }
         _rebuildGate.Dispose();
     }
 }

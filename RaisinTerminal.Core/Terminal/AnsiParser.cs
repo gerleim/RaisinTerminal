@@ -188,9 +188,14 @@ public class AnsiParser
                     OscDispatch?.Invoke(Encoding.UTF8.GetString(_oscData.ToArray()));
                     _state = b == 0x1B ? State.Escape : State.Ground;
                 }
-                else
+                else if (_oscData.Count < 4096)
                 {
                     _oscData.Add(b);
+                }
+                else
+                {
+                    _oscData.Clear();
+                    _state = State.Ground;
                 }
                 break;
         }

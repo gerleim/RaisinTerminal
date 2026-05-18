@@ -258,11 +258,7 @@ public static class ClaudeScreenStateClassifier
             return TerminalStatus.Idle;
         }
 
-        // 6. Numbered options near cursor without idle prompt (plan mode selection UI)
-        if (IsNumberedOptionsActive(scan, cursorRow) && !scan.FoundWorkingIndicator)
-            return TerminalStatus.WaitingForInput;
-
-        // 7. Completion summary + agents, no idle prompt
+        // 6. Completion summary + agents, no idle prompt
         if (scan.FoundLocalAgents && !scan.FoundWorkingIndicator && scan.FoundCompletionSummary)
             return TerminalStatus.AgentsRunning;
 

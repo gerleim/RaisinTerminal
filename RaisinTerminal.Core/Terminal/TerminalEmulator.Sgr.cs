@@ -60,7 +60,7 @@ public partial class TerminalEmulator
                 // Standard foreground colors
                 case 30: case 31: case 32: case 33: case 34: case 35: case 36:
                     (_fgR, _fgG, _fgB) = Ansi16Colors[p - 30]; break;
-                case 37: (_fgR, _fgG, _fgB) = (CellData.DefaultFgR, CellData.DefaultFgG, CellData.DefaultFgB); break;
+                case 37: (_fgR, _fgG, _fgB) = Ansi16Colors[7]; break;
                 case 39: (_fgR, _fgG, _fgB) = (CellData.DefaultFgR, CellData.DefaultFgG, CellData.DefaultFgB); break; // default fg
 
                 // Bright foreground colors

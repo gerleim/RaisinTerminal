@@ -870,6 +870,111 @@ public class Level5_ClaudeSuppressionTests
             $"Scrollback: {string.Join(" | ", t.GetAllScrollbackLines().Select(l => $"\"{l}\""))}\n" +
             $"Screen: {string.Join(" | ", t.GetAllScreenRows().Select(l => $"\"{l}\""))}");
     }
+
+    [Fact]
+    public void ClaudeSuppression_DedupShouldNotRemoveScrollbackLinesNeededAfterFrameShift()
+    {
+        // Reproduces a bug where lines disappear during Claude streaming:
+        //
+        // 1. User has conversation with content in scrollback + screen
+        // 2. User enters input → more lines scroll into scrollback
+        // 3. Claude redraws TUI (CUP 1;1) showing content that overlaps scrollback
+        // 4. RemoveTrailingScrollbackDuplicates removes the overlapping lines
+        // 5. Next frame: response grows, frame shifts → those lines vanish from
+        //    both scrollback and screen
+        // 6. Lines reappear only after the response completes and a full redraw
+        //
+        // The test asserts that scrollback lines removed by dedup are still
+        // accessible in total content after the frame shifts.
+        var h = new TerminalTestHarness(40, 5);
+
+        // Fill with 10 lines: A-E in scrollback, F-J on screen
+        h.FeedLines("Line A", "Line B", "Line C", "Line D", "Line E",
+                    "Line F", "Line G", "Line H", "Line I", "Line J");
+        h.AssertAllScrollback("Line A", "Line B", "Line C", "Line D", "Line E");
+        h.AssertScreenRows("Line F", "Line G", "Line H", "Line I", "Line J");
+
+        // User enters input → F and G scroll into scrollback
+        h.Feed("\r\nPrompt\r\nWorking...");
+        h.AssertAllScrollback("Line A", "Line B", "Line C", "Line D", "Line E",
+                              "Line F", "Line G");
+
+        // Enable Claude redraw suppression
+        h.SetClaudeRedrawSuppression(true);
+
+        // First CUP 1;1 (skipped — initial conversation render)
+        h.CursorHome();
+        h.Feed("Line F\x1b[K\r\nLine G\x1b[K\r\nLine H\x1b[K\r\nLine I\x1b[K\r\nLine J\x1b[K");
+
+        // Scrollback should still have F and G
+        h.AssertAllScrollback("Line A", "Line B", "Line C", "Line D", "Line E",
+                              "Line F", "Line G");
+
+        // Second CUP 1;1 — triggers suppression + dedup pending
+        h.CursorHome();
+        h.Feed("Line F\x1b[K\r\nLine G\x1b[K\r\nLine H\x1b[K\r\nLine I\x1b[K\r\nLine J\x1b[K");
+
+        // BUG: After dedup, F and G are removed from scrollback because they
+        // match screen content. But the screen will change in the next frame.
+
+        // Third CUP 1;1 — response has grown, view shifts down
+        h.CursorHome();
+        h.Feed("Line I\x1b[K\r\nLine J\x1b[K\r\nPrompt\x1b[K\r\nResponse 1\x1b[K\r\nResponse 2\x1b[K");
+
+        // Lines F and G should still be in scrollback — they are real
+        // conversation history, not TUI redraw artifacts.
+        // This assertion FAILS with the bug: F and G were deduped away.
+        h.AssertTotalContent(
+            "Line A", "Line B", "Line C", "Line D", "Line E",
+            "Line F", "Line G",
+            "Line I", "Line J", "Prompt", "Response 1", "Response 2");
+    }
+
+    [Fact]
+    public void ClaudeSuppression_ContentStreaming_ScrollbackVisibleWithoutIdleFlush()
+    {
+        // Reproduces the bug: after user types "next", Claude streams a long
+        // response. Because ClaudeRedrawSuppression is active and
+        // _syncRedrawSuppressScrollback was set by a prior CUP 1;1 frame,
+        // all lines that scroll off the top go to deferred scrollback instead
+        // of real scrollback. The user only sees the bottom of the output;
+        // the beginning appears only after the 5-second idle flush.
+        //
+        // The fix: when a row scrolls off during content streaming (no CUP 1;1
+        // frame header), previously deferred rows should be flushed to real
+        // scrollback progressively, so the user can scroll up immediately.
+        var t = new TerminalTestHarness(40, 5);
+
+        t.SetClaudeRedrawSuppression(true);
+
+        // First CUP skipped (initial render)
+        t.CursorHome();
+        Assert.False(t.Buffer.SuppressScrollback);
+
+        // Second CUP activates suppression (steady-state spinner)
+        t.CursorHome();
+        Assert.True(t.Buffer.SuppressScrollback);
+
+        // Spinner phase: CUP to specific rows, no scrolling
+        t.CursorTo(4, 1).Feed("* Ideating...");
+        t.CursorTo(4, 1).Feed("* Ideating...");
+
+        // Content streaming begins: no CUP 1;1, just sequential lines
+        // that push content off the top of the 5-row screen.
+        t.FeedLines("Line 1", "Line 2", "Line 3", "Line 4", "Line 5",
+                    "Line 6", "Line 7", "Line 8", "Line 9", "Line 10");
+
+        // WITHOUT the fix: all scrolled-off lines are in deferred, real
+        // scrollback is empty, user can't scroll up to see Line 1-5.
+        // WITH the fix: deferred rows are flushed progressively as new
+        // rows scroll off, so they appear in real scrollback immediately.
+        Assert.True(t.Buffer.ScrollbackCount >= 5,
+            $"Content streaming lines must be in real scrollback (got {t.Buffer.ScrollbackCount}), " +
+            "not hidden in deferred buffer until idle flush");
+
+        var scrollback = t.GetAllScrollbackLines();
+        Assert.Contains(scrollback, l => l.Contains("Line 1"));
+    }
 }
 
 // ============================================================================

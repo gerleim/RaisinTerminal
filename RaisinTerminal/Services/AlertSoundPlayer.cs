@@ -8,6 +8,9 @@ public static class AlertSoundPlayer
     private static readonly string MediaFolder = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Media");
 
+    private static SoundPlayer? _cachedPlayer;
+    private static string? _cachedPath;
+
     public static string[] GetAvailableChoices()
     {
         var choices = new List<string>
@@ -63,12 +66,24 @@ public static class AlertSoundPlayer
         {
             var path = Path.Combine(MediaFolder, soundName);
             if (File.Exists(path))
-                new SoundPlayer(path).Play();
+            {
+                if (_cachedPath != path)
+                {
+                    _cachedPlayer?.Dispose();
+                    _cachedPlayer = new SoundPlayer(path);
+                    _cachedPlayer.Load();
+                    _cachedPath = path;
+                }
+                _cachedPlayer!.Play();
+            }
             else
                 SystemSounds.Beep.Play();
         }
         catch
         {
+            _cachedPlayer?.Dispose();
+            _cachedPlayer = null;
+            _cachedPath = null;
             SystemSounds.Beep.Play();
         }
     }

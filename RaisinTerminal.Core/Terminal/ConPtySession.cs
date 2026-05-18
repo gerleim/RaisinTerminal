@@ -191,13 +191,13 @@ public sealed partial class ConPtySession : IDisposable
     /// </summary>
     private static string? ReadPebUnicodeString(IntPtr processHandle, IntPtr procParamsPtr, int offset, int maxLength)
     {
-        if (!ReadProcessMemory(processHandle, procParamsPtr + offset, out short length, (IntPtr)2, out _))
+        if (!ReadProcessMemory(processHandle, procParamsPtr + offset, out ushort length, (IntPtr)2, out _))
             return null;
 
         if (!ReadProcessMemory(processHandle, procParamsPtr + offset + 8, out IntPtr bufferPtr, (IntPtr)IntPtr.Size, out _))
             return null;
 
-        if (length <= 0 || length > maxLength) return null;
+        if (length == 0 || length > maxLength) return null;
 
         var buffer = new byte[length];
         if (!ReadProcessMemory(processHandle, bufferPtr, buffer, (IntPtr)buffer.Length, out _))
@@ -211,18 +211,21 @@ public sealed partial class ConPtySession : IDisposable
         if (_disposed) return;
         _disposed = true;
 
-        try { _process?.Kill(); } catch { }
-        _process?.Dispose();
-        InputStream?.Dispose();
-        OutputStream?.Dispose();
-        _pipeIn?.Dispose();
-        _pipeOut?.Dispose();
-
+        // Close pseudo console first to unblock any pending pipe reads,
+        // then dispose streams/pipes, then kill/dispose the process.
         if (_hPC != IntPtr.Zero)
         {
             ClosePseudoConsole(_hPC);
             _hPC = IntPtr.Zero;
         }
+
+        InputStream?.Dispose();
+        OutputStream?.Dispose();
+        _pipeIn?.Dispose();
+        _pipeOut?.Dispose();
+
+        try { _process?.Kill(); } catch { }
+        _process?.Dispose();
     }
 
     private static void CreatePipes(

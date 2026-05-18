@@ -12,6 +12,7 @@ public class SessionTranscriptLogger : IDisposable
     private readonly StreamWriter _textWriter;
     private readonly object _lock = new();
     private bool _disposed;
+    private int _rawBytesSinceFlush;
 
     public SessionTranscriptLogger(string sessionsDir, string contentId)
     {
@@ -32,6 +33,12 @@ public class SessionTranscriptLogger : IDisposable
         {
             if (_disposed) return;
             _rawStream.Write(buffer, offset, count);
+            _rawBytesSinceFlush += count;
+            if (_rawBytesSinceFlush >= 32_768)
+            {
+                _rawStream.Flush(true);
+                _rawBytesSinceFlush = 0;
+            }
         }
     }
 
@@ -75,7 +82,7 @@ public class SessionTranscriptLogger : IDisposable
         {
             if (_disposed) return;
             _rawStream.Write(markerBytes, 0, markerBytes.Length);
-            _rawStream.Flush();
+            _rawStream.Flush(true);
             _textWriter.Write(marker);
             _textWriter.Flush();
         }

@@ -159,6 +159,7 @@ public partial class TerminalEmulator
                             else if (_skipNextCursorHomeSuppress)
                             {
                                 _skipNextCursorHomeSuppress = false;
+                                _scrollbackCountAtSkippedCup = Buffer.ScrollbackCount;
                             }
                             else
                             {
@@ -166,6 +167,12 @@ public partial class TerminalEmulator
                                 Buffer.SuppressScrollback = true;
                                 _deduplicateScrollbackPending = true;
                             }
+                        }
+
+                        if (_syncRedrawSuppressScrollback)
+                        {
+                            _cupHomeThisFeed = true;
+                            Buffer.ProgressiveFlushDeferred = false;
                         }
                     }
                     Buffer.CursorRow = newRow;

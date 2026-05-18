@@ -65,7 +65,22 @@ public class ProjectNodeViewModel : ViewModelBase
         set => SetProperty(ref _iconSource, value);
     }
 
-    public string? SlnxPath => Directory.Exists(HomePath) ? Directory.GetFiles(HomePath, "*.slnx").FirstOrDefault() : null;
+    private string? _cachedSlnxPath;
+    private bool _slnxPathChecked;
+
+    public string? SlnxPath
+    {
+        get
+        {
+            if (!_slnxPathChecked)
+            {
+                _cachedSlnxPath = Directory.Exists(HomePath) ? Directory.GetFiles(HomePath, "*.slnx").FirstOrDefault() : null;
+                _slnxPathChecked = true;
+            }
+            return _cachedSlnxPath;
+        }
+    }
+
     public bool HasSlnx => SlnxPath != null;
 
     public ObservableCollection<TerminalNodeViewModel> Terminals { get; } = [];

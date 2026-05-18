@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text;
 using System.Windows.Threading;
 using RaisinTerminal.Core.Helpers;
@@ -7,8 +8,8 @@ namespace RaisinTerminal.ViewModels;
 
 public partial class TerminalSessionViewModel
 {
-    private int _inputSuppressionCount;
-    private readonly Queue<byte[]> _inputQueue = new();
+    private volatile int _inputSuppressionCount;
+    private readonly ConcurrentQueue<byte[]> _inputQueue = new();
     private bool _claudeReady;
     private bool _resumePickerPending;
     private bool _renameInProgress;
@@ -131,14 +132,7 @@ public partial class TerminalSessionViewModel
 
     private void WriteEnterDirect()
     {
-        var stream = _conPty?.InputStream;
-        if (stream == null) return;
-        try
-        {
-            stream.Write([0x0D], 0, 1);
-            stream.Flush();
-        }
-        catch { }
+        WriteInput([0x0D]);
     }
 
     public void BeginInputSuppression()

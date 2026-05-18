@@ -67,8 +67,18 @@ public class TerminalBuffer
     private List<CellData[]> _deferredScrollback = new();
     private List<bool> _deferredScrollbackWrapped = new();
 
+    /// <summary>
+    /// When true, deferred rows are flushed to real scrollback before adding
+    /// new ones in <see cref="ScrollUpRegion"/>. The emulator sets this when
+    /// content is streaming without TUI frame headers (no CUP 1;1), and clears
+    /// it when a CUP 1;1 redraw frame starts.
+    /// </summary>
+    public bool ProgressiveFlushDeferred { get; set; }
+
     // Tracks rows pushed to scrollback by resize shrinks, so grow can pull them back.
     private int _resizePushCount;
+
+    private int _effectiveScrollbackCache = -1;
 
     // Scrolling region (DECSTBM)
     public int ScrollTop { get; set; }
@@ -228,6 +238,7 @@ public class TerminalBuffer
         _deferredScrollbackWrapped.Clear();
         _resizePushCount = 0;
         _scrollbackCountAtDeferStart = 0;
+        _effectiveScrollbackCache = 0;
         foreach (var vp in Viewports)
         {
             vp.ScrollOffset = 0;
@@ -253,7 +264,7 @@ public class TerminalBuffer
     /// into scrollback during the initial draw (before ClaudeRedrawSuppression was
     /// enabled) is now also on screen from the cursor-home redraw.
     /// </summary>
-    public void RemoveTrailingScrollbackDuplicates()
+    public void RemoveTrailingScrollbackDuplicates(int minIndex = 0)
     {
         if (_scrollback.Count == 0) return;
 
@@ -267,7 +278,7 @@ public class TerminalBuffer
         if (screenRows.Count == 0) return;
 
         int removeCount = 0;
-        for (int i = _scrollback.Count - 1; i >= 0; i--)
+        for (int i = _scrollback.Count - 1; i >= minIndex; i--)
         {
             string text = GetScrollbackLineText(i).TrimEnd();
             if (text.Length > 0 && screenRows.Contains(text))
@@ -335,6 +346,7 @@ public class TerminalBuffer
             bool evicted = _scrollback.Add(row);
             _scrollbackWrapped.Add(_deferredScrollbackWrapped[i]);
             TotalLinesScrolled++;
+            InvalidateEffectiveScrollbackCache();
             ScrollbackLineAdded?.Invoke(row);
 
             foreach (var vp in Viewports)
@@ -374,6 +386,7 @@ public class TerminalBuffer
                     TotalLinesScrolled++;
                 }
                 _resizePushCount += pushCount;
+                InvalidateEffectiveScrollbackCache();
 
                 foreach (var vp in Viewports)
                 {
@@ -439,6 +452,7 @@ public class TerminalBuffer
             TotalLinesScrolled -= pullCount;
             _resizePushCount -= pullCount;
             CursorRow += pullCount;
+            InvalidateEffectiveScrollbackCache();
 
             foreach (var vp in Viewports)
             {
@@ -495,6 +509,7 @@ public class TerminalBuffer
             bool evicted = _scrollback.Add(row);
             _scrollbackWrapped.Add(_screenWrapped[0]);
             TotalLinesScrolled++;
+            InvalidateEffectiveScrollbackCache();
             ScrollbackLineAdded?.Invoke(row);
 
             // Keep each scrolled-back viewport stable as new lines arrive.
@@ -510,6 +525,9 @@ public class TerminalBuffer
         }
         else if (top == 0 && SuppressScrollback && DeferScrollbackOnSuppress)
         {
+            if (_deferredScrollback.Count > 0 && ProgressiveFlushDeferred)
+                FlushDeferredScrollback();
+
             var row = new CellData[Columns];
             for (int c = 0; c < Columns; c++)
                 row[c] = _screen[0, c];
@@ -594,14 +612,22 @@ public class TerminalBuffer
     {
         get
         {
+            if (_effectiveScrollbackCache >= 0)
+                return _effectiveScrollbackCache;
             for (int i = _scrollback.Count - 1; i >= 0; i--)
             {
                 if (!IsScrollbackLineEmpty(i))
-                    return i + 1;
+                {
+                    _effectiveScrollbackCache = i + 1;
+                    return _effectiveScrollbackCache;
+                }
             }
+            _effectiveScrollbackCache = 0;
             return 0;
         }
     }
+
+    private void InvalidateEffectiveScrollbackCache() => _effectiveScrollbackCache = -1;
 
     /// <summary>
     /// Reads the text content of a scrollback line as a string.

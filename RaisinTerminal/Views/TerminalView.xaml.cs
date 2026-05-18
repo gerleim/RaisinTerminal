@@ -42,9 +42,11 @@ public partial class TerminalView : UserControl
         if (_vm == null) return;
 
         Canvas.Emulator = _vm.Emulator;
+        Canvas.BufferLock = _vm._lock;
         Canvas.Viewport = _viewport;
         Canvas.CompressEmptyLines = SettingsService.Current.CompressEmptyLines;
         PinnedCanvas.Emulator = _vm.Emulator;
+        PinnedCanvas.BufferLock = _vm._lock;
         PinnedCanvas.Viewport = _pinnedViewport;
         PinnedCanvas.CompressEmptyLines = SettingsService.Current.CompressEmptyLines;
         _inputEditor.Attach(_vm, Canvas);
@@ -53,13 +55,16 @@ public partial class TerminalView : UserControl
 
         RegisterViewportAndAltScreenHooks();
 
-        // Start cursor blink timer
-        _cursorTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(530) };
-        _cursorTimer.Tick += (_, _) =>
+        // Start cursor blink timer (guard against multiple OnLoaded calls from AvalonDock)
+        if (_cursorTimer == null)
         {
-            Canvas.CursorVisible = !Canvas.CursorVisible;
-            Canvas.Invalidate();
-        };
+            _cursorTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(530) };
+            _cursorTimer.Tick += (_, _) =>
+            {
+                Canvas.CursorVisible = !Canvas.CursorVisible;
+                Canvas.Invalidate();
+            };
+        }
         _cursorTimer.Start();
 
         // Start session if not already started
@@ -67,6 +72,8 @@ public partial class TerminalView : UserControl
         {
             _vm.StartSession(Canvas.Columns, Canvas.Rows);
             Canvas.Emulator = _vm.Emulator;
+            Canvas.BufferLock = _vm._lock;
+            PinnedCanvas.BufferLock = _vm._lock;
             RegisterViewportAndAltScreenHooks();
         }
 
@@ -184,6 +191,8 @@ public partial class TerminalView : UserControl
         {
             _vm.StartSession(cols, rows);
             Canvas.Emulator = _vm.Emulator;
+            Canvas.BufferLock = _vm._lock;
+            PinnedCanvas.BufferLock = _vm._lock;
             RegisterViewportAndAltScreenHooks();
         }
         else if (MainWindow.IsUserResizing)

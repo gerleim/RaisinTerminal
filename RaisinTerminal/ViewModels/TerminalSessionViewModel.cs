@@ -17,7 +17,7 @@ public partial class TerminalSessionViewModel : ToolWindowViewModel
     private ConPtySession? _conPty;
     private TerminalEmulator? _emulator;
     private CancellationTokenSource? _readCts;
-    private readonly object _lock = new();
+    internal readonly object _lock = new();
     private readonly Channel<byte[]> _writeChannel = Channel.CreateUnbounded<byte[]>(
         new UnboundedChannelOptions { SingleReader = true });
     private SessionTranscriptLogger? _transcriptLogger;
@@ -287,7 +287,7 @@ public partial class TerminalSessionViewModel : ToolWindowViewModel
 
         _emulator.TitleChanged += title =>
         {
-            Dispatcher.CurrentDispatcher.BeginInvoke(() =>
+            System.Windows.Application.Current?.Dispatcher.BeginInvoke(() =>
             {
                 UpdateBaseTitle(title);
                 if (title.Length >= 3 && title[1] == ':' && char.IsLetter(title[0]) && Directory.Exists(title))
@@ -299,7 +299,7 @@ public partial class TerminalSessionViewModel : ToolWindowViewModel
         };
         _emulator.WorkingDirectoryChanged += path =>
         {
-            Dispatcher.CurrentDispatcher.BeginInvoke(() =>
+            System.Windows.Application.Current?.Dispatcher.BeginInvoke(() =>
             {
                 if (Directory.Exists(path))
                     WorkingDirectory = path;

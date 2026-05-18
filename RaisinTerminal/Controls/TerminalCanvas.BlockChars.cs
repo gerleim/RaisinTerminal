@@ -5,7 +5,7 @@ namespace RaisinTerminal.Controls;
 
 public partial class TerminalCanvas
 {
-    private static bool TryDrawBlockChar(DrawingContext dc, char ch, Brush brush, double x, double y, double w, double h)
+    private bool TryDrawBlockChar(DrawingContext dc, char ch, Brush brush, double x, double y, double w, double h)
     {
         switch (ch)
         {
@@ -123,8 +123,7 @@ public partial class TerminalCanvas
             case '╶': // ╶ right half
             {
                 double cy = Math.Round(y + h / 2) + 0.5; // snap to pixel center for crisp 1px line
-                var pen = new Pen(brush, 1);
-                pen.Freeze();
+                var pen = GetOrCreatePen(brush);
                 double left = (ch == '╶') ? x + w / 2 : x;
                 double right = (ch == '╴') ? x + w / 2 : x + w;
                 dc.DrawLine(pen, new Point(left, cy), new Point(right, cy));
@@ -134,13 +133,25 @@ public partial class TerminalCanvas
             case '│': // │
             {
                 double cx = Math.Round(x + w / 2) + 0.5; // snap to pixel center for crisp 1px line
-                var pen = new Pen(brush, 1);
-                pen.Freeze();
+                var pen = GetOrCreatePen(brush);
                 dc.DrawLine(pen, new Point(cx, y), new Point(cx, y + h));
                 return true;
             }
             default:
                 return false;
         }
+    }
+
+    private readonly Dictionary<Brush, Pen> _blockPenCache = new();
+
+    private Pen GetOrCreatePen(Brush brush)
+    {
+        if (!_blockPenCache.TryGetValue(brush, out var pen))
+        {
+            pen = new Pen(brush, 1);
+            pen.Freeze();
+            _blockPenCache[brush] = pen;
+        }
+        return pen;
     }
 }

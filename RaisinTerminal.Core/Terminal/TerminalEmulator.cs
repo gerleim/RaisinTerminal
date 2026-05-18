@@ -75,6 +75,7 @@ public partial class TerminalEmulator : IDisposable
             if (!value)
             {
                 _deduplicateScrollbackPending = false;
+                _scrollbackCountAtSkippedCup = -1;
                 Buffer.FlushDeferredScrollback();
                 Buffer.DeferScrollbackOnSuppress = false;
                 if (_syncRedrawSuppressScrollback &&
@@ -88,8 +89,11 @@ public partial class TerminalEmulator : IDisposable
     }
     private bool _claudeRedrawSuppression;
     private bool _skipNextCursorHomeSuppress;
+    private int _scrollbackCountAtSkippedCup = -1;
     private bool _resizeGrace;
     private bool _deduplicateScrollbackPending;
+    private bool _cupHomeThisFeed;
+    private bool _cupHomePrevFeed;
 
     /// <summary>
     /// When set, printed characters and newlines are written to the transcript log.
@@ -217,10 +221,19 @@ public partial class TerminalEmulator : IDisposable
 
     public void Feed(ReadOnlySpan<byte> data)
     {
+        _cupHomePrevFeed = _cupHomeThisFeed;
+        _cupHomeThisFeed = false;
+        Buffer.ProgressiveFlushDeferred = !_cupHomePrevFeed
+            && _syncRedrawSuppressScrollback
+            && ClaudeRedrawSuppression
+            && !SynchronizedOutput
+            && !AlternateScreen;
+
         _parser.Feed(data);
         _resizeGrace = false;
         if (_deduplicateScrollbackPending)
-            Buffer.RemoveTrailingScrollbackDuplicates();
+            Buffer.RemoveTrailingScrollbackDuplicates(
+                _scrollbackCountAtSkippedCup >= 0 ? _scrollbackCountAtSkippedCup : 0);
         BufferChanged?.Invoke();
         if (!_disposed)
             _idleSnapshotTimer.Change(IdleSnapshotMs, System.Threading.Timeout.Infinite);

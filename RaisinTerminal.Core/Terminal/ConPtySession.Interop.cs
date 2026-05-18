@@ -100,7 +100,7 @@ public sealed partial class ConPtySession
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool ReadProcessMemory(IntPtr hProcess, IntPtr lpBaseAddress,
-        out short lpBuffer, IntPtr nSize, out IntPtr lpNumberOfBytesRead);
+        out ushort lpBuffer, IntPtr nSize, out IntPtr lpNumberOfBytesRead);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool ReadProcessMemory(IntPtr hProcess, IntPtr lpBaseAddress,

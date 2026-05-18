@@ -2434,4 +2434,218 @@ public class TerminalCanvasRenderTests
                 $"{fullHeight} full-height interior empties.");
         }
     }
+
+    /// <summary>
+    /// Scrolls by 1 row at a time (not 3) to catch the cursor-row exemption
+    /// toggling compression on/off at each step. The displayCursorRow shifts
+    /// with scrollOffset and may land on an empty row, un-compressing it for
+    /// one step then re-compressing it the next — causing visible jitter.
+    /// </summary>
+    [StaFact]
+    public void UIScroll_EveryOffset_CompressionNeverToggles()
+    {
+        int bufferRows = 53;
+        int canvasRows = 53;
+        int cols = 155;
+        var emulator = new TerminalEmulator(cols, bufferRows);
+
+        var sb = new StringBuilder();
+        for (int i = 0; i < 100; i++)
+        {
+            if (i > 0) sb.Append("\r\n");
+            sb.Append($"prior-output-line-{i + 1:D4}");
+        }
+        emulator.Feed(Encoding.UTF8.GetBytes(sb.ToString()));
+        emulator.Feed(Encoding.UTF8.GetBytes("\x1b[2J\x1b[H"));
+        emulator.Feed(Encoding.UTF8.GetBytes(BuildTuiScreen53(cols)));
+
+        var buffer = emulator.Buffer;
+
+        // Baseline at scrollOffset=0
+        var viewport0 = new TerminalViewport { IsLive = true, ScrollOffset = 0 };
+        var canvas0 = CreateAndRenderCanvas(emulator, viewport0, cols, canvasRows);
+        var (fullBase, compBase) = CountInteriorEmptyHeights(buffer, canvas0, 0);
+        Assert.True(compBase > 0, "Baseline must have compressed empties");
+
+        int maxOffset = ViewportCalculator.MaxScrollOffset(
+            buffer.Rows, canvasRows, buffer.ScrollbackCount);
+
+        // Test every single scrollOffset from 1 up to 20 (or max)
+        int limit = Math.Min(maxOffset, 20);
+        for (int offset = 1; offset <= limit; offset++)
+        {
+            var viewport = new TerminalViewport { IsLive = true, ScrollOffset = offset };
+            var canvas = CreateAndRenderCanvas(emulator, viewport, cols, canvasRows);
+            var (fullHeight, compressed) = CountInteriorEmptyHeights(buffer, canvas, offset);
+            var detail = DescribeFullHeightInteriorEmpties(buffer, canvas, offset);
+            Assert.True(fullHeight == 0,
+                $"scrollOffset={offset}: {fullHeight} full-height interior empties " +
+                $"(compression toggled). compressed={compressed}\n{detail}");
+        }
+    }
+
+    /// <summary>
+    /// Cursor at (0,0) — as in a Claude Code CUP 1;1 TUI redraw. With cursor at
+    /// row 0, displayCursorRow = scrollOffset, walking through every base row as
+    /// the user scrolls. If any interior empty row coincides with scrollOffset, the
+    /// cursor-row exemption in GetRowHeight un-compresses it for one step.
+    /// </summary>
+    [StaFact]
+    public void UIScroll_CursorAtHome_EveryOffset_CompressionNeverToggles()
+    {
+        int bufferRows = 53;
+        int canvasRows = 53;
+        int cols = 155;
+        var emulator = new TerminalEmulator(cols, bufferRows);
+
+        var sb = new StringBuilder();
+        for (int i = 0; i < 100; i++)
+        {
+            if (i > 0) sb.Append("\r\n");
+            sb.Append($"prior-output-line-{i + 1:D4}");
+        }
+        emulator.Feed(Encoding.UTF8.GetBytes(sb.ToString()));
+        emulator.Feed(Encoding.UTF8.GetBytes("\x1b[2J\x1b[H"));
+        emulator.Feed(Encoding.UTF8.GetBytes(BuildTuiScreen53(cols)));
+        // Move cursor back to (0,0) — matches Claude's CUP 1;1 redraw pattern
+        emulator.Feed(Encoding.UTF8.GetBytes("\x1b[H"));
+
+        var buffer = emulator.Buffer;
+        Assert.Equal(0, buffer.CursorRow);
+
+        var viewport0 = new TerminalViewport { IsLive = true, ScrollOffset = 0 };
+        var canvas0 = CreateAndRenderCanvas(emulator, viewport0, cols, canvasRows);
+        var (fullBase, compBase) = CountInteriorEmptyHeights(buffer, canvas0, 0);
+        Assert.True(compBase > 0, "Baseline must have compressed empties");
+
+        int maxOffset = ViewportCalculator.MaxScrollOffset(
+            buffer.Rows, canvasRows, buffer.ScrollbackCount);
+        int limit = Math.Min(maxOffset, 20);
+        for (int offset = 1; offset <= limit; offset++)
+        {
+            var viewport = new TerminalViewport { IsLive = true, ScrollOffset = offset };
+            var canvas = CreateAndRenderCanvas(emulator, viewport, cols, canvasRows);
+            var (fullHeight, compressed) = CountInteriorEmptyHeights(buffer, canvas, offset);
+            var detail = DescribeFullHeightInteriorEmpties(buffer, canvas, offset);
+            Assert.True(fullHeight == 0,
+                $"scrollOffset={offset}: {fullHeight} full-height interior empties " +
+                $"(cursor at home, compression toggled). compressed={compressed}\n{detail}");
+        }
+    }
+
+    /// <summary>
+    /// Same as above but with hidden cursor (Claude Code TUI). FindVisualCursorRow
+    /// scans for reverse-video rows, and as scrollOffset changes the visible content
+    /// shifts — the scan may find a different display row or find nothing, toggling
+    /// the cursor-row exemption in compression.
+    /// </summary>
+    [StaFact]
+    public void UIScroll_EveryOffset_CursorHidden_CompressionNeverToggles()
+    {
+        int bufferRows = 53;
+        int canvasRows = 53;
+        int cols = 155;
+        var emulator = new TerminalEmulator(cols, bufferRows);
+
+        var sb = new StringBuilder();
+        for (int i = 0; i < 100; i++)
+        {
+            if (i > 0) sb.Append("\r\n");
+            sb.Append($"prior-output-line-{i + 1:D4}");
+        }
+        emulator.Feed(Encoding.UTF8.GetBytes(sb.ToString()));
+        emulator.Feed(Encoding.UTF8.GetBytes("\x1b[2J\x1b[H"));
+        emulator.Feed(Encoding.UTF8.GetBytes(BuildTuiScreen53(cols)));
+        emulator.Feed(Encoding.UTF8.GetBytes("\x1b[?25l")); // hide cursor
+
+        var buffer = emulator.Buffer;
+
+        // Baseline at scrollOffset=0
+        var viewport0 = new TerminalViewport { IsLive = true, ScrollOffset = 0 };
+        var canvas0 = CreateAndRenderCanvas(emulator, viewport0, cols, canvasRows);
+        var (fullBase, compBase) = CountInteriorEmptyHeights(buffer, canvas0, 0);
+        Assert.True(compBase > 0, "Baseline must have compressed empties (cursor hidden)");
+
+        int maxOffset = ViewportCalculator.MaxScrollOffset(
+            buffer.Rows, canvasRows, buffer.ScrollbackCount);
+
+        int limit = Math.Min(maxOffset, 20);
+        for (int offset = 1; offset <= limit; offset++)
+        {
+            var viewport = new TerminalViewport { IsLive = true, ScrollOffset = offset };
+            var canvas = CreateAndRenderCanvas(emulator, viewport, cols, canvasRows);
+            var (fullHeight, compressed) = CountInteriorEmptyHeights(buffer, canvas, offset);
+            var detail = DescribeFullHeightInteriorEmpties(buffer, canvas, offset);
+            Assert.True(fullHeight == 0,
+                $"scrollOffset={offset} (cursor hidden): {fullHeight} full-height interior " +
+                $"empties (compression toggled). compressed={compressed}\n{detail}");
+        }
+    }
+
+    /// <summary>
+    /// Bug reproduction: scrollback contains old prompt lines with reverse-video
+    /// attributes (from previous TUI frames). When cursor is hidden,
+    /// FindVisualCursorRow scans for reverse-video rows. As scrollOffset changes,
+    /// old reverse-video scrollback lines enter the viewport, causing
+    /// FindVisualCursorRow to return different row indices. The cursor-row exemption
+    /// in GetRowHeight then toggles compression on/off for empty rows, causing
+    /// visible jitter during scroll.
+    /// </summary>
+    [StaFact]
+    public void UIScroll_CursorHidden_ReverseVideoInScrollback_CompressionStable()
+    {
+        int bufferRows = 53;
+        int canvasRows = 53;
+        int cols = 155;
+        var emulator = new TerminalEmulator(cols, bufferRows);
+
+        // Phase 1: fill scrollback with lines that include reverse-video prompts.
+        // This simulates a session where the user ran several commands, each
+        // leaving a "❯ " prompt with a reverse-video cursor in scrollback.
+        var sb = new StringBuilder();
+        for (int i = 0; i < 80; i++)
+        {
+            if (i > 0) sb.Append("\r\n");
+            if (i % 10 == 9)
+            {
+                // Every 10th line: a prompt-like line with reverse-video space
+                // (no other content → FindVisualCursorRow can match it)
+                sb.Append("\x1b[7m \x1b[27m" + new string(' ', cols - 1));
+            }
+            else
+            {
+                sb.Append($"prior-output-line-{i + 1:D4}");
+            }
+        }
+        emulator.Feed(Encoding.UTF8.GetBytes(sb.ToString()));
+
+        // Phase 2: clear screen and draw TUI with interior empty rows
+        emulator.Feed(Encoding.UTF8.GetBytes("\x1b[2J\x1b[H"));
+        emulator.Feed(Encoding.UTF8.GetBytes(BuildTuiScreen53(cols)));
+        emulator.Feed(Encoding.UTF8.GetBytes("\x1b[?25l")); // hide cursor
+
+        var buffer = emulator.Buffer;
+        Assert.True(buffer.ScrollbackCount > 0, "Must have scrollback");
+
+        // Baseline
+        var viewport0 = new TerminalViewport { IsLive = true, ScrollOffset = 0 };
+        var canvas0 = CreateAndRenderCanvas(emulator, viewport0, cols, canvasRows);
+        var (fullBase, compBase) = CountInteriorEmptyHeights(buffer, canvas0, 0);
+        Assert.True(compBase > 0, "Baseline must have compressed empties");
+
+        int maxOffset = ViewportCalculator.MaxScrollOffset(
+            buffer.Rows, canvasRows, buffer.ScrollbackCount);
+        int limit = Math.Min(maxOffset, 20);
+
+        for (int offset = 1; offset <= limit; offset++)
+        {
+            var viewport = new TerminalViewport { IsLive = true, ScrollOffset = offset };
+            var canvas = CreateAndRenderCanvas(emulator, viewport, cols, canvasRows);
+            var (fullHeight, compressed) = CountInteriorEmptyHeights(buffer, canvas, offset);
+            var detail = DescribeFullHeightInteriorEmpties(buffer, canvas, offset);
+            Assert.True(fullHeight == 0,
+                $"scrollOffset={offset}: {fullHeight} full-height interior empties " +
+                $"(reverse-video in scrollback toggled compression). compressed={compressed}\n{detail}");
+        }
+    }
 }

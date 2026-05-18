@@ -112,7 +112,6 @@ public partial class TerminalView
         if (target.Row != ScreenRowToAbsoluteRow(buffer, buffer.CursorRow)) return;
 
         int delta = target.Col - buffer.CursorCol;
-        System.Diagnostics.Debug.WriteLine($"[Reposition] target=({target.Row},{target.Col}) cursor=({buffer.CursorRow},{buffer.CursorCol}) delta={delta}");
         if (delta == 0) return;
 
         // Send the appropriate arrow key sequences as a single batch
@@ -132,11 +131,11 @@ public partial class TerminalView
             IsDescendantOf(src, InputOverlay))
             return;
 
-        // Right-click paste
+        // Right-click paste (supports both text and images, like Ctrl+V)
         Canvas.Focus();
-        if (_vm != null && _vm.IsConnected && Clipboard.ContainsText())
+        if (_vm != null && _vm.IsConnected)
         {
-            PasteText(Clipboard.GetText());
+            PasteFromClipboard();
         }
         e.Handled = true;
     }

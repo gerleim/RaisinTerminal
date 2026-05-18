@@ -87,7 +87,7 @@ public static class AttachmentService
         }
         catch (IOException ex)
         {
-            App.Events.Log(null!, $"Failed to delete attachment {filePath}: {ex.Message}",
+            App.Events.Log(typeof(AttachmentService), $"Failed to delete attachment {filePath}: {ex.Message}",
                 severity: Raisin.EventSystem.MessageSeverity.Warning, category: "Attachments");
             return false;
         }

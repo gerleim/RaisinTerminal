@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Threading;
 using System.Windows;
 using System.Windows.Media;
 using RaisinTerminal.Core.Models;
@@ -58,6 +59,12 @@ public partial class TerminalCanvas : FrameworkElement
     public double CellHeight => _cellHeight;
 
     public TerminalEmulator? Emulator { get; set; }
+
+    /// <summary>
+    /// Lock object shared with the ViewModel to synchronize buffer access
+    /// between the background reader thread and the UI render thread.
+    /// </summary>
+    public object? BufferLock { get; set; }
 
     /// <summary>
     /// Viewport driving this canvas's scroll position. Required for rendering
@@ -142,9 +149,15 @@ public partial class TerminalCanvas : FrameworkElement
         if (_glyphCache.Count > 10_000) _glyphCache.Clear();
         if (_brushCache.Count > 10_000) _brushCache.Clear();
         if (_penCache.Count > 10_000) _penCache.Clear();
+        if (_blockPenCache.Count > 10_000) _blockPenCache.Clear();
 
         // Background
         dc.DrawRectangle(DefaultBg, null, new Rect(0, 0, ActualWidth, ActualHeight));
+
+        var bufferLock = BufferLock;
+        if (bufferLock != null) Monitor.Enter(bufferLock);
+        try
+        {
 
         var buffer = Emulator?.Buffer;
         if (buffer == null) return;
@@ -159,9 +172,16 @@ public partial class TerminalCanvas : FrameworkElement
         int baseRowCount = ViewportCalculator.BaseRowCount(buffer.Rows, Rows);
         int viewOffset = ViewportCalculator.ViewOffset(buffer.Rows, Rows);
 
-        int displayCursorRow = ViewportCalculator.DisplayCursorRow(buffer.CursorRow, viewOffset) + scrollOffset;
+        int displayCursorRow;
         if (!(Emulator?.CursorEnabled ?? true))
             displayCursorRow = FindVisualCursorRow(buffer, baseRowCount, scrollOffset);
+        else
+            displayCursorRow = ViewportCalculator.DisplayCursorRow(buffer.CursorRow, viewOffset) + scrollOffset;
+
+        // For compression layout, never exempt any row from compression based on
+        // cursor position. All interior empty rows should compress uniformly,
+        // preventing visual jitter when scrollOffset changes displayCursorRow.
+        int compressionCursorRow = int.MinValue;
 
         int extraRows = 0;
         int displayedBaseRows = baseRowCount;
@@ -187,7 +207,7 @@ public partial class TerminalCanvas : FrameworkElement
                 : baseIsEmpty[..displayedBaseRows];
 
             var basePositions = RowLayoutCalculator.ComputeRowYPositions(
-                trimmedEmpty, displayCursorRow, _cellHeight, EmptyRowScale);
+                trimmedEmpty, compressionCursorRow, _cellHeight, EmptyRowScale);
 
             {
                 double savedPixels = ActualHeight - basePositions[displayedBaseRows];
@@ -230,7 +250,7 @@ public partial class TerminalCanvas : FrameworkElement
             else if (extraRows == 0)
             {
                 rowYPositions = RowLayoutCalculator.ComputeLayout(
-                    baseIsEmpty, displayCursorRow, _cellHeight, EmptyRowScale, ActualHeight);
+                    baseIsEmpty, compressionCursorRow, _cellHeight, EmptyRowScale, ActualHeight);
             }
             else
             {
@@ -239,7 +259,7 @@ public partial class TerminalCanvas : FrameworkElement
                 for (int row = 0; row < totalCandidateRows; row++)
                     allIsEmpty[row] = IsRowEmptyForDisplay(buffer, row, extraRows, scrollOffset, baseRowCount);
 
-                int adjustedCursorRow = displayCursorRow + extraRows;
+                int adjustedCursorRow = compressionCursorRow;
                 if (topAnchor || baseRowCount < Rows || displayedBaseRows < baseRowCount)
                 {
                     rowYPositions = RowLayoutCalculator.ComputeRowYPositions(
@@ -252,7 +272,7 @@ public partial class TerminalCanvas : FrameworkElement
                         allIsEmpty = new bool[totalCandidateRows];
                         for (int row = 0; row < totalCandidateRows; row++)
                             allIsEmpty[row] = IsRowEmptyForDisplay(buffer, row, extraRows, scrollOffset, baseRowCount);
-                        adjustedCursorRow = displayCursorRow + extraRows;
+                        adjustedCursorRow = compressionCursorRow;
                         rowYPositions = RowLayoutCalculator.ComputeRowYPositions(
                             allIsEmpty, adjustedCursorRow, _cellHeight, EmptyRowScale);
                     }
@@ -265,7 +285,7 @@ public partial class TerminalCanvas : FrameworkElement
                         allIsEmpty = new bool[totalCandidateRows];
                         for (int row = 0; row < totalCandidateRows; row++)
                             allIsEmpty[row] = IsRowEmptyForDisplay(buffer, row, extraRows, scrollOffset, baseRowCount);
-                        adjustedCursorRow = displayCursorRow + extraRows;
+                        adjustedCursorRow = compressionCursorRow;
                         rowYPositions = RowLayoutCalculator.ComputeRowYPositions(
                             allIsEmpty, adjustedCursorRow, _cellHeight, EmptyRowScale);
                         if (rowYPositions[totalCandidateRows] > ActualHeight)
@@ -275,7 +295,7 @@ public partial class TerminalCanvas : FrameworkElement
                             allIsEmpty = new bool[totalCandidateRows];
                             for (int row = 0; row < totalCandidateRows; row++)
                                 allIsEmpty[row] = IsRowEmptyForDisplay(buffer, row, extraRows, scrollOffset, baseRowCount);
-                            adjustedCursorRow = displayCursorRow + extraRows;
+                            adjustedCursorRow = compressionCursorRow;
                             rowYPositions = RowLayoutCalculator.ComputeRowYPositions(
                                 allIsEmpty, adjustedCursorRow, _cellHeight, EmptyRowScale);
                             break;
@@ -302,9 +322,8 @@ public partial class TerminalCanvas : FrameworkElement
                 var allIsEmpty2 = new bool[total];
                 for (int row = 0; row < total; row++)
                     allIsEmpty2[row] = IsRowEmptyForDisplay(buffer, row, extraRows, scrollOffset, baseRowCount);
-                int adjCursor = displayCursorRow + extraRows;
                 rowYPositions = RowLayoutCalculator.ComputeRowYPositions(
-                    allIsEmpty2, adjCursor, _cellHeight, EmptyRowScale);
+                    allIsEmpty2, compressionCursorRow, _cellHeight, EmptyRowScale);
             }
 
             // When the screen is fully filled (bottom row has content) and
@@ -337,6 +356,28 @@ public partial class TerminalCanvas : FrameworkElement
 
         long absRowBase = ViewportCalculator.AbsoluteRowBase(buffer.TotalLinesScrolled, viewOffset, scrollOffset, extraRows);
         _absRowBase = absRowBase;
+
+        // Pre-index visible search matches by absolute row for O(1) lookup per cell
+        Dictionary<long, List<SearchMatch>>? searchByRow = null;
+        if (SearchMatches != null && SearchMatches.Count > 0)
+        {
+            long visibleStart = absRowBase;
+            long visibleEnd = absRowBase + totalRows;
+            searchByRow = new Dictionary<long, List<SearchMatch>>();
+            foreach (var m in SearchMatches)
+            {
+                if (m.AbsoluteRow >= visibleStart && m.AbsoluteRow < visibleEnd)
+                {
+                    if (!searchByRow.TryGetValue(m.AbsoluteRow, out var list))
+                    {
+                        list = new List<SearchMatch>();
+                        searchByRow[m.AbsoluteRow] = list;
+                    }
+                    list.Add(m);
+                }
+            }
+            if (searchByRow.Count == 0) searchByRow = null;
+        }
 
         for (int row = 0; row < totalRows; row++)
         {
@@ -382,11 +423,10 @@ public partial class TerminalCanvas : FrameworkElement
                 }
 
                 // Draw search highlights
-                if (SearchMatches != null)
+                if (searchByRow != null && searchByRow.TryGetValue(absRow, out var rowMatches))
                 {
-                    foreach (var match in SearchMatches)
+                    foreach (var match in rowMatches)
                     {
-                        if (match.AbsoluteRow != absRow) continue;
                         if (col >= match.StartCol && col < match.StartCol + match.Length)
                         {
                             bool isCurrent = CurrentSearchMatch.HasValue &&
@@ -394,7 +434,7 @@ public partial class TerminalCanvas : FrameworkElement
                                              CurrentSearchMatch.Value.StartCol == match.StartCol;
                             dc.DrawRectangle(isCurrent ? CurrentSearchHighlightBrush : SearchHighlightBrush,
                                 null, new Rect(x, y, _cellWidth, rowH));
-                            break; // only one match can cover this cell
+                            break;
                         }
                     }
                 }
@@ -464,6 +504,12 @@ public partial class TerminalCanvas : FrameworkElement
             double cursorH = rowYPositions[cursorDisplayRow + 1] - cy;
 
             dc.DrawRectangle(CursorBlockBrush, null, new Rect(cx, cy, _cellWidth, cursorH));
+        }
+
+        }
+        finally
+        {
+            if (bufferLock != null) Monitor.Exit(bufferLock);
         }
     }
 
@@ -600,6 +646,11 @@ public partial class TerminalCanvas : FrameworkElement
         if (SelectionStart == null || SelectionEnd == null || Emulator?.Buffer == null)
             return "";
 
+        var bufferLock = BufferLock;
+        if (bufferLock != null) Monitor.Enter(bufferLock);
+        try
+        {
+
         var buffer = Emulator.Buffer;
         var (sr, sc, er, ec) = GetNormalizedSelection();
         if (sr < 0) return "";
@@ -656,6 +707,12 @@ public partial class TerminalCanvas : FrameworkElement
             }
         }
         return sb.ToString().TrimEnd();
+
+        }
+        finally
+        {
+            if (bufferLock != null) Monitor.Exit(bufferLock);
+        }
     }
 
     private (long StartRow, int StartCol, long EndRow, int EndCol) GetNormalizedSelection()
